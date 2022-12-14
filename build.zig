@@ -55,6 +55,10 @@ pub fn build(b: *std.build.Builder) void {
     dynlib.setTarget(target);
     dynlib.install();
 
+    // Install C/C++ headers
+    b.installFile("./include/mimalloc.h", "include/mimalloc.h");
+    b.installFile("./include/mimalloc-new-delete.h", "include/mimalloc-new-delete.h");
+
     const ctest_step = b.step("ctest", "Build and Run C Tests");
     const ctests = [_][:0]const u8{ "api", "api-fill", "stress" };
     inline for (ctests) |t| {
