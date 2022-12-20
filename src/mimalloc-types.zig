@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const Atomic = std.atomic.Atomic;
+const Random = std.rand.Random;
 
 // ------------------------------------------------------
 // Extended functionality
@@ -13,6 +14,7 @@ pub const SMALL_WSIZE_MAX = 128;
 pub const SMALL_SIZE_MAX = SMALL_WSIZE_MAX * @sizeOf(usize);
 
 pub const arena_id_t = i32;
+pub const ARENA_ID_NONE = 0;
 
 // -------------------------------------------------------------------------------------
 // Aligned allocation
@@ -345,15 +347,8 @@ const page_queue_t = struct {
 
 pub const BIN_FULL = BIN_HUGE + 1;
 
-// Random context
-const random_ctx_t = struct {
-    input: [16]u32,
-    output: [16]u32,
-    output_available: i32,
-};
-
 // In debug mode there is a padding structure at the end of the blocks to check for buffer overflows
-const padding_t = if (PADDING) struct {
+const padding_t = if (PADDING > 0) struct {
     canary: u32, // encoded block value to check validity of the padding (in case of overflow)
     delta: u32, // padding bytes before the block. (usable_size(p) - delta == exact allocated bytes)
 } else u0;
@@ -366,18 +361,18 @@ const PAGES_DIRECT = (SMALL_WSIZE_MAX + PADDING_WSIZE + 1);
 // A heap owns a set of pages.
 pub const heap_t = struct {
     tld: ?*tld_t = null,
-    pages_free_direct: [PAGES_DIRECT]?*page_t = [_]page_t{null} ** PAGES_DIRECT, // optimize: array where every entry points a page with possibly free blocks in the corresponding queue for that size.
+    pages_free_direct: [PAGES_DIRECT]?*page_t = [_]?*page_t{null} ** PAGES_DIRECT, // optimize: array where every entry points a page with possibly free blocks in the corresponding queue for that size.
     pages: [BIN_FULL + 1]page_queue_t = [_]page_queue_t{.{}} ** (BIN_FULL + 1), // queue of pages for each size class (or "bin")
     thread_delayed_free: Atomic(?*block_t) = Atomic(?*block_t).init(null),
     thread_id: threadid_t = 0, // thread this heap belongs too
     arena_id: arena_id_t = 0, // arena id if the heap belongs to a specific arena (or 0)
     cookie: usize = 0, // random cookie to verify pointers (see `_ptr_cookie`)
     keys: [2]usize = .{ 0, 0 }, // two random keys used to encode the `thread_delayed_free` list
-    random: random_ctx_t = 0, // random number context used for secure allocation
+    random: Random, // random number context used for secure allocation
     page_count: usize = 0, // total number of pages in the `pages` queues.
     page_retired_min: usize = BIN_FULL, // smallest retired index (retired pages are fully free, but still in the page queues)
     page_retired_max: usize = 0, // largest retired index into the `pages` array.
-    next: *heap_t = null, // list of heaps per thread
+    next: ?*heap_t = null, // list of heaps per thread
     no_reclaim: bool = false, // `true` if this heap should not reclaim abandoned pages
 };
 
@@ -405,34 +400,34 @@ pub const stat_count_t = struct {
 };
 
 pub const stat_counter_t = struct {
-    total: i64,
-    count: i64,
+    total: i64 = 0,
+    count: i64 = 0,
 };
 
 pub const stats_t = struct {
-    segments: stat_count_t,
-    pages: stat_count_t,
-    reserved: stat_count_t,
-    committed: stat_count_t,
-    reset: stat_count_t,
-    page_committed: stat_count_t,
-    segments_abandoned: stat_count_t,
-    pages_abandoned: stat_count_t,
-    threads: stat_count_t,
-    normal: stat_count_t,
-    huge: stat_count_t,
-    large: stat_count_t,
-    malloc: stat_count_t,
-    segments_cache: stat_count_t,
-    pages_extended: stat_counter_t,
-    mmap_calls: stat_counter_t,
-    commit_calls: stat_counter_t,
-    page_no_retire: stat_counter_t,
-    searches: stat_counter_t,
-    normal_count: stat_counter_t,
-    huge_count: stat_counter_t,
-    large_count: stat_counter_t,
-    normal_bins: if (STAT > 1) [74]stat_count_t else u0,
+    segments: stat_count_t = .{},
+    pages: stat_count_t = .{},
+    reserved: stat_count_t = .{},
+    committed: stat_count_t = .{},
+    reset: stat_count_t = .{},
+    page_committed: stat_count_t = .{},
+    segments_abandoned: stat_count_t = .{},
+    pages_abandoned: stat_count_t = .{},
+    threads: stat_count_t = .{},
+    normal: stat_count_t = .{},
+    huge: stat_count_t = .{},
+    large: stat_count_t = .{},
+    malloc: stat_count_t = .{},
+    segments_cache: stat_count_t = .{},
+    pages_extended: stat_counter_t = .{},
+    mmap_calls: stat_counter_t = .{},
+    commit_calls: stat_counter_t = .{},
+    page_no_retire: stat_counter_t = .{},
+    searches: stat_counter_t = .{},
+    normal_count: stat_counter_t = .{},
+    huge_count: stat_counter_t = .{},
+    large_count: stat_counter_t = .{},
+    normal_bins: if (STAT > 1) [74]stat_count_t else u0 = if (STAT > 1) [_]stat_count_t{.{}} ** 74,
 };
 
 // ------------------------------------------------------
@@ -442,8 +437,8 @@ pub const stats_t = struct {
 // A "span" is is an available range of slices. The span queues keep
 // track of slice spans of at most the given `slice_count` (but more than the previous size class).
 pub const span_queue_t = struct {
-    first: ?*slice_t = 0,
-    last: ?*slice_t = 0,
+    first: ?*slice_t = null,
+    last: ?*slice_t = null,
     slice_count: usize,
 };
 
