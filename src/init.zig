@@ -6,10 +6,19 @@
 // -----------------------------------------------------------------------------*/
 
 const std = @import("std");
-const mi = @import("mimalloc-types");
+const builtin = std.builtin;
+const AtomicOrder = builtin.AtomicOrder;
+const AtomicRmwOp = builtin.AtomicRmwOp;
+const mi = struct {
+    usingnamespace @import("types.zig");
+    usingnamespace @import("heap.zig");
+    usingnamespace @import("stats.zig");
+};
 const assert = std.debug.assert;
-const atomic = std.atomic.Atomic;
+const Atomic = std.atomic.Atomic;
 const Thread = std.Thread;
+const Prng = std.rand.DefaultPrng;
+const crandom = std.crypto.random;
 
 // Empty page used to initialize the small free pages array
 const _page_empty: mi.page_t = .{};
@@ -17,7 +26,7 @@ const _page_empty: mi.page_t = .{};
 const SMALL_PAGES_EMPTY = [1]*mi.page_t{&_page_empty} ** if (mi.PADDING > 0 and mi.INTPTR_SIZE >= 8) 130 else if (mi.PADDING > 0) 131 else 129;
 
 // Empty page queues for every bin
-fn QNULL(sz: usize) mi.page_queue_t {
+fn QNULL(comptime sz: usize) mi.page_queue_t {
     return .{ .block_size = sz * @sizeOf(usize) };
 }
 
@@ -37,7 +46,7 @@ const PAGE_QUEUES_EMPTY = [_]mi.page_queue_t{
 };
 
 // Empty slice span queues for every bin
-fn SQNULL(sz: usize) mi.span_queue_t {
+fn SQNULL(comptime sz: usize) mi.span_queue_t {
     return .{ .slice_count = sz };
 }
 
@@ -59,10 +68,15 @@ const SEGMENT_SPAN_QUEUES_EMPTY = [_]mi.span_queue_t{
 // may lead to allocation itself on some platforms)
 // --------------------------------------------------------
 
-const _heap_empty: mi.heap_t = .{};
+// Should have been const but zig does not allow casting away const
+pub var _heap_empty: mi.heap_t = .{ .random = undefined };
 
 // the thread-local default heap for allocation
-threadlocal var _heap_default: mi.heap_t = &_heap_empty;
+threadlocal var _heap_default: *mi.heap_t = &_heap_empty;
+
+pub fn get_default_heap() *mi.heap_t {
+    return _heap_default;
+}
 
 const tld_empty = mi.tld_t{
     .segments = .{ .spans = SEGMENT_SPAN_QUEUES_EMPTY },
@@ -71,28 +85,29 @@ const tld_empty = mi.tld_t{
 var tld_main = mi.tld_t{
     .heap_backing = &_heap_main,
     .heaps = &_heap_main,
-    .segments = .{ .span = SEGMENT_SPAN_QUEUES_EMPTY, .stats = &tld_main.stats, .os = &tld_main.os },
-    .os = .{ .stats = &tld_main.stats }, // os
+    //    .segments = .{ .spans = SEGMENT_SPAN_QUEUES_EMPTY, .stats = &tld_main.stats, .os = &tld_main.os }
+    .segments = .{ .spans = SEGMENT_SPAN_QUEUES_EMPTY },
+    // .os = .{ .stats = &tld_main.stats }, // os
 };
 
 var _heap_main = mi.heap_t{
-    .tld = &tld_main,
     .pages = PAGE_QUEUES_EMPTY,
-    // .random = .{ input = [1]u32{0x846ca68b} ** 16, .output = [1]u32{0} ** 16, .output_available = 0 },
-
+    .random = undefined, // TODO
 };
 
 var _process_is_initialized = false; // set to `true` in `process_init`.
 
-var _stats_main = mi.stats_t{};
+pub var _stats_main = mi.stats_t{};
 
 fn heap_main_init() void {
     if (_heap_main.cookie == 0) {
+        _heap_main.tld = &tld_main;
         _heap_main.thread_id = Thread.getCurrentId();
-        _heap_main.cookie = _os_random_weak(&heap_main_init);
-        _random_init(&_heap_main.random);
-        _heap_main.keys[0] = _heap_random_next(&_heap_main);
-        _heap_main.keys[1] = _heap_random_next(&_heap_main);
+        var rng = Prng.init(crandom.int(u64));
+        _heap_main.random = rng.random();
+        _heap_main.cookie = _heap_main.random.int(u64);
+        _heap_main.keys[0] = _heap_main.random.int(u64);
+        _heap_main.keys[1] = _heap_main.random.int(u64);
     }
 }
 
@@ -119,38 +134,37 @@ const thread_data_t = struct {
 const TD_CACHE_SIZE = 8;
 var td_cache = [_]?*thread_data_t{null} ** TD_CACHE_SIZE;
 
-fn thread_data_alloc() !*thread_data_t {
+fn thread_data_alloc() *thread_data_t {
     // try to find thread metadata in the cache
-    var td: *thread_data_t = undefined;
+    var td: ?*thread_data_t = null;
     var i: usize = 0;
     while (i < TD_CACHE_SIZE) : (i += 1) {
-        td = atomic_load_ptr_relaxed(thread_data_t, &td_cache[i]);
-        if (td != NULL) {
-            td = atomic_exchange_ptr_acq_rel(thread_data_t, &td_cache[i], null);
-            if (td != NULL) {
-                return td;
+        td = @atomicLoad(?*thread_data_t, &td_cache[i], AtomicOrder.Monotonic);
+        if (td != null) {
+            td = @atomicRmw(?*thread_data_t, &td_cache[i], AtomicRmwOp.Xchg, null, AtomicOrder.Monotonic);
+            if (td != null) {
+                return td.?;
             }
         }
     }
     // if that fails, allocate directly from the OS
     const page_allocator = std.heap.page_allocator;
-    var allocator = page_allocator.allocator();
-    td = allocator.create(thread_data_t) catch null;
+    td = page_allocator.create(thread_data_t) catch null;
     if (td == null) {
         // if this fails, try once more. (issue #257)
-        td = try allocator.create(thread_data_t);
+        td = page_allocator.create(thread_data_t) catch unreachable;
     }
-    return td;
+    return td.?;
 }
 
 fn thread_data_free(tdfree: *thread_data_t) void {
     // try to add the thread metadata to the cache
     var i: usize = 0;
     while (i < TD_CACHE_SIZE) : (i += 1) {
-        var td: ?*thread_data_t = atomic_load_ptr_relaxed(thread_data_t, &td_cache[i]);
+        var td: ?*thread_data_t = @atomicLoad(thread_data_t, &td_cache[i], builtin.Monotonic);
         if (td == null) {
-            var expected: ?*thread_data_t = null;
-            if (atomic_cas_ptr_weak_acq_rel(thread_data_t, &td_cache[i], &expected, tdfree)) {
+            const prev = @atomicRmw(thread_data_t, &td_cache[i], builtin.Xchg, tdfree, builtin.Monotonic);
+            if (prev == null) {
                 return;
             }
         }
@@ -165,10 +179,10 @@ fn thread_data_collect() void {
     // free all thread metadata from the cache
     var i: usize = 0;
     while (i < TD_CACHE_SIZE) : (i += 1) {
-        var td: ?*thread_data_t = atomic_load_ptr_relaxed(thread_data_t, &td_cache[i]);
+        var td: ?*thread_data_t = @atomicLoad(thread_data_t, &td_cache[i], builtin.Monotonic);
         if (td != null) {
-            td = atomic_exchange_ptr_acq_rel(thread_data_t, &td_cache[i], null);
-            if (td != NULL) {
+            td = @atomicRmw(thread_data_t, &td_cache[i], builtin.Xchg, null, builtin.Monotonic);
+            if (td != null) {
                 const page_allocator = std.heap.page_allocator;
                 var allocator = page_allocator.allocator();
                 allocator.destroy(td);
@@ -178,10 +192,10 @@ fn thread_data_collect() void {
 }
 
 // Initialize the thread local default heap, called from `thread_init`
-fn _heap_init() !bool {
-    if (mi.heap_is_initialized(mi.get_default_heap())) return true;
+fn _heap_init() bool {
+    if (get_default_heap().is_initialized()) return true;
     if (_is_main_thread()) {
-        // assert_internal(_heap_main.thread_id != 0);  // can happen on freeBSD where alloc is called before any inittialization
+        // assert_internal(_heap_main.thread_id != 0);  // can happen on freeBSD where alloc is called before any initialization
         // the main heap is statically allocated
         heap_main_init();
         _heap_set_default_direct(&_heap_main);
@@ -194,10 +208,11 @@ fn _heap_init() !bool {
         var tld = &td.tld;
         var heap = &td.heap;
         heap.thread_id = Thread.getCurrentId();
-        _random_init(&heap.random);
-        heap.cookie = _heap_random_next(heap) | 1;
-        heap.keys[0] = _heap_random_next(heap);
-        heap.keys[1] = _heap_random_next(heap);
+        var rng = Prng.init(crandom.int(u64));
+        heap.random = rng.random();
+        heap.cookie = heap.random.int(u64) | 1;
+        heap.keys[0] = heap.random.int(u64);
+        heap.keys[1] = heap.random.int(u64);
         heap.tld = tld;
         tld.heap_backing = heap;
         tld.heaps = heap;
@@ -222,11 +237,11 @@ fn _heap_done(heap: *mi.heap_t) bool {
 
     // delete all non-backing heaps in this thread
     var curr = heap.tld.heaps;
-    while (curr != NULL) {
+    while (curr != null) {
         var next = curr.next; // save `next` as `curr` will be freed
         if (curr != heap) {
             assert(!mi.heap_is_backing(curr));
-            heap_delete(curr);
+            mi.mi_heap_delete(curr);
         }
         curr = next;
     }
@@ -235,11 +250,11 @@ fn _heap_done(heap: *mi.heap_t) bool {
 
     // collect if not the main thread
     if (heap != &_heap_main) {
-        _heap_collect_abandon(heap);
+        mi.mi_heap_collect_abandon(heap);
     }
 
     // merge stats
-    _stats_done(&heap.tld.stats);
+    mi.mi_stats_done(&heap.tld.stats);
 
     // free if not the main thread
     if (heap != &_heap_main) {
@@ -253,7 +268,7 @@ fn _heap_done(heap: *mi.heap_t) bool {
         if (0) {
             // never free the main thread even in debug mode; if a dll is linked statically with mimalloc,
             // there may still be delete/free calls after the fls_done is called. Issue #207
-            _heap_destroy_pages(heap);
+            mi._heap_destroy_pages(heap);
             assert(heap.tld.heap_backing == &_heap_main);
         }
     }
@@ -276,7 +291,7 @@ fn _heap_done(heap: *mi.heap_t) bool {
 // to set up the thread local keys.
 // --------------------------------------------------------
 
-fn _is_main_thread() bool {
+pub fn _is_main_thread() bool {
     return (_heap_main.thread_id == 0 or _heap_main.thread_id == Thread.getCurrentId());
 }
 
@@ -296,8 +311,8 @@ pub fn thread_init() void {
     //  fiber/pthread key to a non-zero value, ensuring `_thread_done` is called)
     if (_heap_init()) return; // returns true if already initialized
 
-    _stat_increase(&_stats_main.threads, 1);
-    atomic_increment_relaxed(&thread_count);
+    mi.mi_stat_increase(&_stats_main.threads, 1);
+    _ = thread_count.fetchAdd(1, AtomicOrder.Monotonic);
     //_verbose_message("thread init: 0x%zx\n", Thread.getCurrentId());
 }
 
@@ -306,8 +321,8 @@ pub fn thread_done() void {
 }
 
 pub fn _thread_done(heap: *mi.heap_t) void {
-    atomic_decrement_relaxed(&thread_count);
-    _stat_decrease(&_stats_main.threads, 1);
+    thread_count.decrement();
+    mi._stat_decrease(&_stats_main.threads, 1);
 
     // check thread-id as on Windows shutdown with FLS the main (exit) thread may call this on thread-local heaps...
     if (heap.thread_id != Thread.getCurrentId()) return;
@@ -316,7 +331,7 @@ pub fn _thread_done(heap: *mi.heap_t) void {
     if (_heap_done(heap)) return; // returns true if already ran
 }
 
-fn _heap_set_default_direct(heap: *mi.heap_t) void {
+pub fn _heap_set_default_direct(heap: *mi.heap_t) void {
     _heap_default = heap;
 }
 
@@ -339,7 +354,7 @@ fn is_redirected() bool {
 fn process_load() void {
     heap_main_init();
     os_preloading = false;
-    _options_init();
+    mi._options_init();
     process_init();
     //stats_reset();-
 }
@@ -348,32 +363,33 @@ fn process_load() void {
 pub fn process_init() void {
     // ensure we are called once
     if (_process_is_initialized) return;
-    _verbose_message("process init: 0x%zx\n", Thread.getCurrentId());
+    std.log.debug("process init: 0x{}", .{Thread.getCurrentId()});
     _process_is_initialized = true;
 
-    detect_cpu_features();
-    _os_init();
+    // TODO: os.zig: mi._os_init();
     heap_main_init();
-    if (mi.DEBUG)
-        _verbose_message("debug level : %d\n", mi.DEBUG);
-    _verbose_message("secure level: %d\n", mi.SECURE);
+    if (mi.DEBUG > 0)
+        std.log.debug("debug level: {}", .{mi.DEBUG});
+    std.log.debug("secure level: {}", .{mi.SECURE});
     thread_init();
 
-    stats_reset(); // only call stat reset *after* thread init (or the heap tld == NULL)
+    mi.mi_stats_reset(); // only call stat reset *after* thread init (or the heap tld == NULL)
 
-    if (option_is_enabled(option_reserve_huge_os_pages)) {
-        pages = option_get_clamp(option_reserve_huge_os_pages, 0, 128 * 1024);
-        reserve_at = option_get(option_reserve_huge_os_pages_at);
+    // TODO: options.zig: if (mi.option_is_enabled(mi.option_reserve_huge_os_pages)) {
+    if (false) {
+        const pages = mi.option_get_clamp(mi.option_reserve_huge_os_pages, 0, 128 * 1024);
+        const reserve_at = mi.option_get(mi.option_reserve_huge_os_pages_at);
         if (reserve_at != -1) {
-            reserve_huge_os_pages_at(pages, reserve_at, pages * 500);
+            mi.reserve_huge_os_pages_at(pages, reserve_at, pages * 500);
         } else {
-            reserve_huge_os_pages_interleave(pages, 0, pages * 500);
+            mi.reserve_huge_os_pages_interleave(pages, 0, pages * 500);
         }
     }
-    if (option_is_enabled(option_reserve_os_memory)) {
-        ksize = option_get(option_reserve_os_memory);
+    // TODO: options.zig: if (mi.option_is_enabled(mi.option_reserve_os_memory)) {
+    if (false) {
+        const ksize = mi.option_get(mi.option_reserve_os_memory);
         if (ksize > 0) {
-            reserve_os_memory(ksize * KiB, true, true);
+            mi.reserve_os_memory(ksize * mi.KiB, true, true);
         }
     }
 }
@@ -393,11 +409,11 @@ pub fn process_done() void {
         // free all memory if possible on process exit. This is not needed for a stand-alone process
         // but should be done if mimalloc is statically linked into another shared library which
         // is repeatedly loaded/unloaded, see issue #281.
-        collect(true); // force
+        mi.collect(true); // force
     }
-    if (option_is_enabled(option_show_stats) || option_is_enabled(option_verbose)) {
-        stats_print(NULL);
+    if (mi.option_is_enabled(mi.option_show_stats) || mi.option_is_enabled(mi.option_verbose)) {
+        mi.stats_print(null);
     }
-    _verbose_message("process done: 0x%zx\n", _heap_main.thread_id);
+    std.log.debug("process done: 0x{:x}", .{_heap_main.thread_id});
     os_preloading = true; // don't call the C runtime anymore
 }
