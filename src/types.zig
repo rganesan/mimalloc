@@ -4,8 +4,19 @@
 // "LICENSE" at the root of this distribution.
 
 const std = @import("std");
+const builtin = std.builtin;
+const AtomicOrder = builtin.AtomicOrder;
 const Atomic = std.atomic.Atomic;
 const Random = std.rand.Random;
+const Prng = std.rand.DefaultPrng;
+
+inline fn mi_likely(cond: bool) bool {
+    return cond;
+}
+
+const mi = struct {
+    usingnamespace @import("init.zig");
+};
 
 // ------------------------------------------------------
 // Extended functionality
@@ -77,7 +88,7 @@ pub const ENCODE_FREELIST = (SECURE >= 3 or DEBUG >= 1);
 // possible in zig?
 pub const INTPTR_SHIFT = if (@sizeOf(usize) > @sizeOf(u64)) 4 else if (@sizeOf(usize) == @sizeOf(u64)) 3 else if (@sizeOf(usize) == @sizeOf(u32)) 2 else unreachable;
 
-pub const SIZE_SHIFT = if (@sizeOf(usize) == u64) 3 else if (@sizeOf(usize) == @sizeOf(u32)) 2 else unreachable;
+pub const SIZE_SHIFT = if (@sizeOf(usize) == @sizeOf(u64)) 3 else if (@sizeOf(usize) == @sizeOf(u32)) 2 else unreachable;
 pub const ssize_t = isize;
 
 pub const INTPTR_SIZE = 1 << INTPTR_SHIFT;
@@ -218,6 +229,8 @@ pub const error_fun = fn (c_int, ?*anyopaque) callconv(.C) void;
 //   will be freed correctly even if only other threads free blocks.
 
 pub const page_t = struct {
+    const Self = @This();
+
     // "owned" by the segment
     slice_count: u32 = 0, // slices in this page (0 if not a page)
     slice_offset: u32 = 0, // distance from the actual page data slice (0 if a page)
@@ -242,12 +255,46 @@ pub const page_t = struct {
 
     local_free: ?*block_t = null, // list of deferred free blocks by this thread (migrates to `free`)
     xthread_free: Atomic(thread_free_t) = Atomic(thread_free_t).init(0), // list of deferred free blocks freed by other threads
-    xheap: Atomic(usize) = Atomic(usize).init(0),
+    xheap: Atomic(?*heap_t) = Atomic(?*heap_t).init(null),
     next: ?*page_t = null, // next page owned by this thread with the same `block_size`
     prev: ?*page_t = null, // previous page owned by this thread with the same `block_size`
 
     // 64-bit 9 words, 32-bit 12 words, (+2 for secure)
     padding: if (INTPTR_SIZE == 8) [1]usize else u0 = if (INTPTR_SIZE == 8) .{0} else 0,
+
+    pub fn block_size(self: *const Self) usize {
+        const bsize = self.xblock_size;
+        assert(bsize == 0);
+        if (bsize < HUGE_BLOCK_SIZE) {
+            return bsize;
+        }
+        var psize: usize = undefined;
+        // TODO: segment.zig: _mi_segment_page_start(_mi_page_segment(page), page, &psize);
+        psize = 0;
+        return psize;
+    }
+
+    pub fn thread_free(self: *const Self) ?*block_t {
+        return @intToPtr(?*block_t, self.xthread_free.load(AtomicOrder.Monotonic) & ~@intCast(thread_free_t, 3)); // TODO: check boolMask usage
+    }
+
+    pub fn heap(self: *const Self) ?*heap_t {
+        return self.xheap.load(AtomicOrder.Monotonic); // TODO: check order
+    }
+
+    pub fn all_free(self: *const Self) bool {
+        return self.used == 0;
+    }
+
+    pub fn is_valid(self: *const Self) bool {
+        // TODO: page.zig
+        _ = self;
+        return true;
+    }
+
+    pub fn segment(self: *const Self) *segment_t {
+        return @intToPtr(*segment_t, @ptrToInt(self) & SEGMENT_MASK);
+    }
 };
 
 pub const page_kind_t = enum {
@@ -289,7 +336,7 @@ const commit_mask_t = struct {
 };
 
 const slice_t = page_t;
-const msecs_t = i64;
+pub const msecs_t = i64;
 
 // Segments are large allocated memory blocks (8mb on 64 bit) from
 // the OS. Inside segments we allocated fixed size _pages_ that
@@ -339,7 +386,7 @@ pub const segment_t = struct {
 // ------------------------------------------------------
 
 // Pages of a certain block size are held in a queue.
-const page_queue_t = struct {
+pub const page_queue_t = struct {
     first: ?*page_t = null,
     last: ?*page_t = null,
     block_size: usize = 0,
@@ -360,6 +407,8 @@ const PAGES_DIRECT = (SMALL_WSIZE_MAX + PADDING_WSIZE + 1);
 
 // A heap owns a set of pages.
 pub const heap_t = struct {
+    const Self = @This();
+
     tld: ?*tld_t = null,
     pages_free_direct: [PAGES_DIRECT]?*page_t = [_]?*page_t{null} ** PAGES_DIRECT, // optimize: array where every entry points a page with possibly free blocks in the corresponding queue for that size.
     pages: [BIN_FULL + 1]page_queue_t = [_]page_queue_t{.{}} ** (BIN_FULL + 1), // queue of pages for each size class (or "bin")
@@ -368,12 +417,24 @@ pub const heap_t = struct {
     arena_id: arena_id_t = 0, // arena id if the heap belongs to a specific arena (or 0)
     cookie: usize = 0, // random cookie to verify pointers (see `_ptr_cookie`)
     keys: [2]usize = .{ 0, 0 }, // two random keys used to encode the `thread_delayed_free` list
-    random: Random, // random number context used for secure allocation
+    random: Random = undefined, // random number context used for secure allocation
     page_count: usize = 0, // total number of pages in the `pages` queues.
     page_retired_min: usize = BIN_FULL, // smallest retired index (retired pages are fully free, but still in the page queues)
     page_retired_max: usize = 0, // largest retired index into the `pages` array.
     next: ?*heap_t = null, // list of heaps per thread
     no_reclaim: bool = false, // `true` if this heap should not reclaim abandoned pages
+
+    pub fn is_initialized(self: *const Self) bool {
+        return self != &mi._heap_empty;
+    }
+
+    pub fn is_backing(self: *const Self) bool {
+        return (self.tld.?.heap_backing.? == self);
+    }
+
+    pub fn is_default(self: *const Self) bool {
+        return (self == mi.get_default_heap());
+    }
 };
 
 // ------------------------------------------------------
@@ -390,7 +451,7 @@ const assert = std.debug.assert;
 // Statistics
 // ------------------------------------------------------
 
-const STAT = if (DEBUG > 0) 2 else 0;
+pub const STAT = if (DEBUG > 0) 2 else 0;
 
 pub const stat_count_t = struct {
     allocated: i64 = 0,
@@ -447,7 +508,7 @@ const SEGMENT_BIN_MAX = 35; // 35 == segment_bin(SLICES_PER_SEGMENT)
 // OS thread local data
 pub const os_tld_t = struct {
     region_idx: usize = 0, // start point for next allocation
-    stats: ?[*]stats_t = null, // points to tld stats
+    stats: ?*stats_t = null, // points to tld stats
 };
 
 // Segments thread local data
