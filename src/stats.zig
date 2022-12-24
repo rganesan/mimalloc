@@ -17,12 +17,32 @@ const mi = struct {
     usingnamespace @import("heap.zig");
 };
 
+const MI_STAT = mi.MI_STAT;
+const MI_BIN_HUGE = mi.MI_BIN_HUGE;
+
+const mi_stats_t = mi.mi_stats_t;
+const mi_stat_count_t = mi.mi_stat_count_t;
+const mi_stat_counter_t = mi.mi_stat_counter_t;
+const mi_msecs_t = mi.mi_msecs_t;
+
+const _mi_bin_size = mi._mi_bin_size;
+
+const mi_heap_get_default = mi.mi_heap_get_default;
+const _mi_os_numa_node_count = mi._mi_os_numa_node_count;
+
+const _mi_stats_main = mi._mi_stats_main;
+
+const mi_output_fun = *const fn (msg: []const u8, arg: *void) void;
+const mi_snprintf = mi.mi_snprintf;
+const _mi_fprintf = mi._mi_fprintf;
+const _mi_fputs = mi._mi_fputs;
+
 //-----------------------------------------------------------
 //  Statistics operations
 //-----------------------------------------------------------
 
-pub fn mi_is_in_main(stat: *const mi.stat_count_t) bool {
-    return @ptrToInt(stat) >= @ptrToInt(&mi._stats_main) and @ptrToInt(stat) < (@ptrToInt(&mi._stats_main) + @sizeOf(mi.stats_t));
+pub fn mi_is_in_main(stat: *const mi_stat_count_t) bool {
+    return @ptrToInt(stat) >= @ptrToInt(&mi._mi_stats_main) and @ptrToInt(stat) < (@ptrToInt(&mi._mi_stats_main) + @sizeOf(mi_stats_t));
 }
 
 inline fn mi_atomic_addi64_relaxed(p: *volatile i64, x: i64) void {
@@ -36,7 +56,7 @@ inline fn mi_atomic_maxi64_relaxed(p: *volatile i64, x: i64) void {
     }
 }
 
-fn mi_stat_update(stat: *mi.stat_count_t, amount: i64) void {
+fn mi_stat_update(stat: *mi_stat_count_t, amount: i64) void {
     if (amount == 0) return;
     if (mi_is_in_main(stat)) {
         // add atomically (for abandoned pages)
@@ -59,7 +79,7 @@ fn mi_stat_update(stat: *mi.stat_count_t, amount: i64) void {
     }
 }
 
-fn _mi_stat_counter_increase(stat: *mi.stat_counter_t, amount: usize) void {
+fn _mi_stat_counter_increase(stat: *mi_stat_counter_t, amount: usize) void {
     if (mi_is_in_main(stat)) {
         @atomicRmw(i64, &stat.count, builtin.Add, 1, builtin.Monotonic);
         @atomicRmw(i64, &stat.total, builtin.Add, @intCast(i64, amount), builtin.Monotonic);
@@ -69,16 +89,16 @@ fn _mi_stat_counter_increase(stat: *mi.stat_counter_t, amount: usize) void {
     }
 }
 
-pub fn mi_stat_increase(stat: *mi.stat_count_t, amount: usize) void {
+pub fn _mi_stat_increase(stat: *mi_stat_count_t, amount: usize) void {
     mi_stat_update(stat, @intCast(i64, amount));
 }
 
-pub fn mi_stat_decrease(stat: *mi.stat_count_t, amount: usize) void {
+pub fn _mi_stat_decrease(stat: *mi_stat_count_t, amount: usize) void {
     mi_stat_update(stat, -@intCast(i64, amount));
 }
 
 // must be thread safe as it is called from stats_merge
-fn mi_stat_add(stat: *mi.stat_count_t, src: *const mi.stat_count_t, unit: i64) void {
+fn mi_stat_add(stat: *mi_stat_count_t, src: *const mi_stat_count_t, unit: i64) void {
     if (stat == src) return;
     if (src.allocated == 0 and src.freed == 0) return;
     mi_atomic_addi64_relaxed(&stat.allocated, src.allocated * unit);
@@ -88,14 +108,14 @@ fn mi_stat_add(stat: *mi.stat_count_t, src: *const mi.stat_count_t, unit: i64) v
     mi_atomic_addi64_relaxed(&stat.peak, src.peak * unit);
 }
 
-fn mi_stat_counter_add(stat: *mi.stat_counter_t, src: *const mi.stat_counter_t, unit: i64) void {
+fn mi_stat_counter_add(stat: *mi_stat_counter_t, src: *const mi_stat_counter_t, unit: i64) void {
     if (stat == src) return;
     mi_atomic_addi64_relaxed(&stat.total, src.total * unit);
     mi_atomic_addi64_relaxed(&stat.count, src.count * unit);
 }
 
 // must be thread safe as it is called from stats_merge
-fn mi_stats_add(stats: *mi.stats_t, src: *const mi.stats_t) void {
+fn mi_stats_add(stats: *mi_stats_t, src: *const mi_stats_t) void {
     if (stats == src) return;
     mi_stat_add(&stats.segments, &src.segments, 1);
     mi_stat_add(&stats.pages, &src.pages, 1);
@@ -123,9 +143,9 @@ fn mi_stats_add(stats: *mi.stats_t, src: *const mi.stats_t) void {
     mi_stat_counter_add(&stats.normal_count, &src.normal_count, 1);
     mi_stat_counter_add(&stats.huge_count, &src.huge_count, 1);
     mi_stat_counter_add(&stats.large_count, &src.large_count, 1);
-    if (mi.STAT > 1) {
+    if (MI_STAT > 1) {
         var i: usize = 0;
-        while (i <= mi.BIN_HUGE) : (i += 1) {
+        while (i <= MI_BIN_HUGE) : (i += 1) {
             if (src.normal_bins[i].allocated > 0 or src.normal_bins[i].freed > 0) {
                 mi_stat_add(&stats.normal_bins[i], &src.normal_bins[i], 1);
             }
@@ -140,7 +160,7 @@ fn mi_stats_add(stats: *mi.stats_t, src: *const mi.stats_t) void {
 // unit > 0 : size in binary bytes
 // unit == 0: count as decimal
 // unit < 0 : count in binary
-fn mi_printf_amount(n: i64, unit: i64, out: *mi.output_fun, arg: *opaque {}, fmt: ?[]const u8) void {
+fn mi_printf_amount(n: i64, unit: i64, out: *mi_output_fun, arg: *opaque {}, fmt: ?[]const u8) void {
     var buf: [32]u8 = undefined;
     buf[0] = 0;
     const suffix = if (unit <= 0) " " else "B";
@@ -167,26 +187,26 @@ fn mi_printf_amount(n: i64, unit: i64, out: *mi.output_fun, arg: *opaque {}, fmt
         const whole = (tens / 10);
         const frac1 = (tens % 10);
         var unitdesc: [8]u8 = undefined;
-        mi.snprintf(unitdesc, 8, "%s%s%s", magnitude, if (base == 1024) ?"i" else "", suffix);
-        mi.snprintf(buf, buf.len, "%ld.%ld %-3s", whole, if (frac1 < 0) -frac1 else frac1, unitdesc);
+        mi_snprintf(unitdesc, 8, "%s%s%s", magnitude, if (base == 1024) ?"i" else "", suffix);
+        mi_snprintf(buf, buf.len, "%ld.%ld %-3s", whole, if (frac1 < 0) -frac1 else frac1, unitdesc);
     }
-    mi._mi_fprintf(out, arg, if (fmt == null) "%11s" else fmt.?, buf);
+    _mi_fprintf(out, arg, if (fmt == null) "%11s" else fmt.?, buf);
 }
 
-fn mi_print_amount(n: i64, unit: i64, out: *mi.output_fun, arg: ?*opaque {}) void {
+fn mi_print_amount(n: i64, unit: i64, out: *mi_output_fun, arg: ?*opaque {}) void {
     mi_printf_amount(n, unit, out, arg, null);
 }
 
-fn mi_print_count(n: i64, unit: i64, out: *mi.output_fun, arg: ?*opaque {}) void {
+fn mi_print_count(n: i64, unit: i64, out: *mi_output_fun, arg: ?*opaque {}) void {
     if (unit == 1) {
-        mi._mi_fprintf(out, arg, "%11s", " ");
+        _mi_fprintf(out, arg, "%11s", " ");
     } else {
         mi_print_amount(n, 0, out, arg);
     }
 }
 
-fn mi_stat_print(stat: *const mi.stat_count_t, msg: []const u8, unit: i64, out: *mi.output_fun, arg: *opaque {}) void {
-    mi._mi_fprintf(out, arg, "%10s:", msg);
+fn mi_stat_print(stat: *const mi_stat_count_t, msg: []const u8, unit: i64, out: *mi_output_fun, arg: *opaque {}) void {
+    _mi_fprintf(out, arg, "%10s:", msg);
     if (unit > 0) {
         mi_print_amount(stat.peak, unit, out, arg);
         mi_print_amount(stat.allocated, unit, out, arg);
@@ -195,9 +215,9 @@ fn mi_stat_print(stat: *const mi.stat_count_t, msg: []const u8, unit: i64, out: 
         mi_print_amount(unit, 1, out, arg);
         mi_print_count(stat.allocated, unit, out, arg);
         if (stat.allocated > stat.freed) {
-            mi._mi_fprintf(out, arg, "  not all freed!\n");
+            _mi_fprintf(out, arg, "  not all freed!\n");
         } else {
-            mi._mi_fprintf(out, arg, "  ok\n");
+            _mi_fprintf(out, arg, "  ok\n");
         }
     } else if (unit < 0) {
         mi_print_amount(stat.peak, -1, out, arg);
@@ -205,44 +225,44 @@ fn mi_stat_print(stat: *const mi.stat_count_t, msg: []const u8, unit: i64, out: 
         mi_print_amount(stat.freed, -1, out, arg);
         mi_print_amount(stat.current, -1, out, arg);
         if (unit == -1) {
-            mi._mi_fprintf(out, arg, "%22s", "");
+            _mi_fprintf(out, arg, "%22s", "");
         } else {
             mi_print_amount(-unit, 1, out, arg);
             mi_print_count((stat.allocated / -unit), 0, out, arg);
         }
         if (stat.allocated > stat.freed) {
-            mi._mi_fprintf(out, arg, "  not all freed!\n");
+            _mi_fprintf(out, arg, "  not all freed!\n");
         } else {
-            mi._mi_fprintf(out, arg, "  ok\n");
+            _mi_fprintf(out, arg, "  ok\n");
         }
     } else {
         mi_print_amount(stat.peak, 1, out, arg);
         mi_print_amount(stat.allocated, 1, out, arg);
-        mi._mi_fprintf(out, arg, "%11s", " "); // no freed
+        _mi_fprintf(out, arg, "%11s", " "); // no freed
         mi_print_amount(stat.current, 1, out, arg);
-        mi._mi_fprintf(out, arg, "\n");
+        _mi_fprintf(out, arg, "\n");
     }
 }
 
-fn mi_stat_counter_print(stat: *const mi.stat_counter_t, msg: []const u8, out: *mi.out_fn, arg: *opaque {}) void {
-    mi._mi_fprintf(out, arg, "%10s:", msg);
+fn mi_stat_counter_print(stat: *const mi_stat_counter_t, msg: []const u8, out: *mi_output_fun, arg: *opaque {}) void {
+    _mi_fprintf(out, arg, "%10s:", msg);
     mi_print_amount(stat.total, -1, out, arg);
-    mi._mi_fprintf(out, arg, "\n");
+    _mi_fprintf(out, arg, "\n");
 }
 
-fn mi_stat_counter_print_avg(stat: *const mi.stat_counter_t, msg: []const u8, out: *mi.out_fn, arg: *opaque {}) void {
+fn mi_stat_counter_print_avg(stat: *const mi_stat_counter_t, msg: []const u8, out: *mi_output_fun, arg: *opaque {}) void {
     const avg_tens = if (stat.count == 0) 0 else (stat.total * 10 / stat.count);
     const avg_whole = (avg_tens / 10);
     const avg_frac1 = (avg_tens % 10);
-    mi._mi_fprintf(out, arg, "%10s: %5ld.%ld avg\n", msg, avg_whole, avg_frac1);
+    _mi_fprintf(out, arg, "%10s: %5ld.%ld avg\n", msg, avg_whole, avg_frac1);
 }
 
-fn mi_print_header(out: *mi.output_fun, arg: *opaque {}) void {
-    mi._mi_fprintf(out, arg, "%10s: %10s %10s %10s %10s %10s %10s\n", "heap stats", "peak   ", "total   ", "freed   ", "current   ", "unit   ", "count   ");
+fn mi_print_header(out: *mi_output_fun, arg: *opaque {}) void {
+    _mi_fprintf(out, arg, "%10s: %10s %10s %10s %10s %10s %10s\n", "heap stats", "peak   ", "total   ", "freed   ", "current   ", "unit   ", "count   ");
 }
 
-fn mi_stats_print_bins(bins: *const mi.stat_count_t, max: usize, fmt: []const u8, out: *mi.output_fun, arg: *opaque {}) void {
-    if (mi.STAT <= 1) return;
+fn mi_stats_print_bins(bins: *const mi_stat_count_t, max: usize, fmt: []const u8, out: *mi_output_fun, arg: *opaque {}) void {
+    if (MI_STAT <= 1) return;
 
     var found = false;
     var buf: [64]u8 = undefined;
@@ -250,13 +270,13 @@ fn mi_stats_print_bins(bins: *const mi.stat_count_t, max: usize, fmt: []const u8
     while (i <= max) : (i += 1) {
         if (bins[i].allocated > 0) {
             found = true;
-            const unit = mi.bin_size(i);
-            mi.snprintf(buf, 64, "%s %3lu", fmt, i);
+            const unit = _mi_bin_size(i);
+            mi_snprintf(buf, 64, "%s %3lu", fmt, i);
             mi_stat_print(&bins[i], buf, unit, out, arg);
         }
     }
     if (found) {
-        mi._mi_fprintf(out, arg, "\n");
+        _mi_fprintf(out, arg, "\n");
         mi_print_header(out, arg);
     }
 }
@@ -266,7 +286,7 @@ fn mi_stats_print_bins(bins: *const mi.stat_count_t, max: usize, fmt: []const u8
 // (which is nice when using loggers etc.)
 //------------------------------------------------------------
 const buffered_t = struct {
-    out: mi.output_fun, // original output function
+    out: mi_output_fun, // original output function
     arg: *opaque {}, // and state
     buf: []u8, // local buffer of at least size `count+1`
     used: usize, // currently used chars `used <= count`
@@ -275,7 +295,7 @@ const buffered_t = struct {
 
 fn mi_buffered_flush(buf: *buffered_t) void {
     buf.buf[buf.used] = 0;
-    mi._mi_fputs(buf.out, buf.arg, null, buf.buf);
+    _mi_fputs(buf.out, buf.arg, null, buf.buf);
     buf.used = 0;
 }
 
@@ -294,7 +314,7 @@ fn mi_buffered_out(msg: []const u8, arg: *opaque {}) void {
 // Print statistics
 //------------------------------------------------------------
 
-fn mi_stat_process_info(elapsed: *mi.mi_msecs_t, utime: *mi.mi_msecs_t, stime: *mi.mi_msecs_t, current_rss: *usize, peak_rss: *usize, current_commit: *usize, peak_commit: *usize, page_faults: *usize) void {
+fn mi_stat_process_info(elapsed: *mi_msecs_t, utime: *mi_msecs_t, stime: *mi_msecs_t, current_rss: *usize, peak_rss: *usize, current_commit: *usize, peak_commit: *usize, page_faults: *usize) void {
     _ = elapsed;
     _ = utime;
     _ = stime;
@@ -305,7 +325,7 @@ fn mi_stat_process_info(elapsed: *mi.mi_msecs_t, utime: *mi.mi_msecs_t, stime: *
     _ = page_faults;
 }
 
-fn _mi_stats_print(stats: *mi.stats_t, out0: mi.output_fun, arg0: *opaque {}) void {
+fn _mi_stats_print(stats: *mi_stats_t, out0: mi_output_fun, arg0: *opaque {}) void {
     // wrap the output function to be line buffered
     var buf: [256]u8 = undefined;
     var buffer = buffered_t{ .out = out0, .arg = arg0, .buf = buf, .used = 0, .count = 255 };
@@ -314,21 +334,21 @@ fn _mi_stats_print(stats: *mi.stats_t, out0: mi.output_fun, arg0: *opaque {}) vo
 
     // and print using that
     mi_print_header(out, arg);
-    if (mi.STAT > 1)
-        mi_stats_print_bins(stats.normal_bins, mi.BIN_HUGE, "normal", out, arg);
-    if (mi.STAT > 0) {
+    if (MI_STAT > 1)
+        mi_stats_print_bins(stats.normal_bins, MI_BIN_HUGE, "normal", out, arg);
+    if (MI_STAT > 0) {
         mi_stat_print(&stats.normal, "normal", if (stats.normal_count.count == 0) 1 else -(stats.normal.allocated / stats.normal_count.count), out, arg);
         mi_stat_print(&stats.large, "large", if (stats.large_count.count == 0) 1 else -(stats.large.allocated / stats.large_count.count), out, arg);
         mi_stat_print(&stats.huge, "huge", if (stats.huge_count.count == 0) 1 else -(stats.huge.allocated / stats.huge_count.count), out, arg);
-        var total: mi.stats_count_t = .{};
+        var total: mi_stat_count_t = .{};
         mi_stat_add(&total, &stats.normal, 1);
         mi_stat_add(&total, &stats.large, 1);
         mi_stat_add(&total, &stats.huge, 1);
         mi_stat_print(&total, "total", 1, out, arg);
     }
-    if (mi.STAT > 1) {
+    if (MI_STAT > 1) {
         mi_stat_print(&stats.malloc, "malloc req", 1, out, arg);
-        mi._mi_fprintf(out, arg, "\n");
+        _mi_fprintf(out, arg, "\n");
     }
     mi_stat_print(&stats.reserved, "reserved", 1, out, arg);
     mi_stat_print(&stats.committed, "committed", 1, out, arg);
@@ -345,35 +365,35 @@ fn _mi_stats_print(stats: *mi.stats_t, out0: mi.output_fun, arg0: *opaque {}) vo
     mi_stat_counter_print(&stats.commit_calls, "commits", out, arg);
     mi_stat_print(&stats.threads, "threads", -1, out, arg);
     mi_stat_counter_print_avg(&stats.searches, "searches", out, arg);
-    mi._mi_fprintf(out, arg, "%10s: %7zu\n", "numa nodes", mi._mi_os_numa_node_count());
+    _mi_fprintf(out, arg, "%10s: %7zu\n", "numa nodes", _mi_os_numa_node_count());
 
-    var elapsed: mi.msecs_t = undefined;
-    var user_time: mi.msecs_t = undefined;
-    var sys_time: mi.msecs_t = undefined;
+    var elapsed: mi_msecs_t = undefined;
+    var user_time: mi_msecs_t = undefined;
+    var sys_time: mi_msecs_t = undefined;
     var current_rss: usize = undefined;
     var peak_rss: usize = undefined;
     var current_commit: usize = undefined;
     var peak_commit: usize = undefined;
     var page_faults: usize = undefined;
     mi_stat_process_info(&elapsed, &user_time, &sys_time, &current_rss, &peak_rss, &current_commit, &peak_commit, &page_faults);
-    mi._mi_fprintf(out, arg, "%10s: %7ld.%03ld s\n", "elapsed", elapsed / 1000, elapsed % 1000);
-    mi._mi_fprintf(out, arg, "%10s: user: %ld.%03ld s, system: %ld.%03ld s, faults: %lu, rss: ", "process", user_time / 1000, user_time % 1000, sys_time / 1000, sys_time % 1000, page_faults);
+    _mi_fprintf(out, arg, "%10s: %7ld.%03ld s\n", "elapsed", elapsed / 1000, elapsed % 1000);
+    _mi_fprintf(out, arg, "%10s: user: %ld.%03ld s, system: %ld.%03ld s, faults: %lu, rss: ", "process", user_time / 1000, user_time % 1000, sys_time / 1000, sys_time % 1000, page_faults);
     mi_printf_amount(peak_rss, 1, out, arg, "%s");
     if (peak_commit > 0) {
-        mi._mi_fprintf(out, arg, ", commit: ");
+        _mi_fprintf(out, arg, ", commit: ");
         mi_printf_amount(peak_commit, 1, out, arg, "%s");
     }
-    mi._mi_fprintf(out, arg, "\n");
+    _mi_fprintf(out, arg, "\n");
 }
 
-var mi_process_start: mi.msecs_t = 0;
+var mi_process_start: mi_msecs_t = 0;
 
-fn mi_stats_get_default() *mi.stats_t {
-    const heap = mi.mi_heap_get_default();
+fn mi_stats_get_default() *mi_stats_t {
+    const heap = mi_heap_get_default();
     return &heap.tld.?.stats;
 }
 
-fn mi_stats_merge_from(stats: *mi.stats_t) void {
+fn mi_stats_merge_from(stats: *mi_stats_t) void {
     if (stats != &mi._mi_stats_main) {
         mi_stats_add(&mi._mi_stats_main, stats);
         stats = .{};
@@ -383,10 +403,10 @@ fn mi_stats_merge_from(stats: *mi.stats_t) void {
 
 pub fn mi_stats_reset() void {
     var stats = mi_stats_get_default();
-    if (stats != &mi._stats_main) {
+    if (stats != &mi._mi_stats_main) {
         stats.* = .{};
     }
-    mi._stats_main = .{};
+    mi._mi_stats_main = .{};
     if (mi_process_start == 0) {
         mi_process_start = _mi_clock_start();
     }
@@ -396,34 +416,34 @@ fn mi_stats_merge() void {
     mi_stats_merge_from(mi_stats_get_default());
 }
 
-fn _mi_stats_done(stats: *mi.stats_t) void { // called from `mi_thread_done`
+fn _mi_stats_done(stats: *mi_stats_t) void { // called from `mi_thread_done`
     mi_stats_merge_from(stats);
 }
 
-fn mi_stats_print_out(out: mi.output_fun, arg: ?*opaque {}) void {
+fn mi_stats_print_out(out: mi_output_fun, arg: ?*opaque {}) void {
     mi_stats_merge_from(mi_stats_get_default());
     _mi_stats_print(&mi._mi_stats_main, out, arg);
 }
 
 fn mi_stats_print(out: *opaque {}) void {
     // for compatibility there is an `out` parameter (which can be `stdout` or `stderr`)
-    mi_stats_print_out(@ptrCast(mi.output_fun, out), null);
+    mi_stats_print_out(@ptrCast(mi_output_fun, out), null);
 }
 
-fn mi_thread_stats_print_out(out: mi.output_fn, arg: *opaque {}) void {
+fn mi_thread_stats_print_out(out: mi_output_fun, arg: *opaque {}) void {
     _mi_stats_print(mi_stats_get_default(), out, arg);
 }
 
 // ----------------------------------------------------------------
 // Basic timer for convenience; use milli-seconds to avoid doubles
 // ----------------------------------------------------------------
-fn mi_clock_now() mi.msecs_t {
+fn mi_clock_now() mi_msecs_t {
     return std.time.milliTimestamp();
 }
 
-var mi_clock_diff: mi.msecs_t = 0;
+var mi_clock_diff: mi_msecs_t = 0;
 
-pub fn _mi_clock_start() mi.msecs_t {
+pub fn _mi_clock_start() mi_msecs_t {
     if (mi_clock_diff == 0) {
         const t0 = mi_clock_now();
         mi_clock_diff = mi_clock_now() - t0;
@@ -431,7 +451,7 @@ pub fn _mi_clock_start() mi.msecs_t {
     return mi_clock_now();
 }
 
-pub fn _mi_clock_end(start: mi.msecs_t) mi.msecs_t {
+pub fn _mi_clock_end(start: mi_msecs_t) mi_msecs_t {
     const end = mi_clock_now();
     return end - start - mi_clock_diff;
 }
