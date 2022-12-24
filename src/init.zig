@@ -20,17 +20,100 @@ const Thread = std.Thread;
 const Prng = std.rand.DefaultPrng;
 const crandom = std.crypto.random;
 
-// Empty page used to initialize the small free pages array
-const _page_empty: mi.page_t = .{};
+const MI_DEBUG = mi.MI_DEBUG;
+const MI_SECURE = mi.MI_SECURE;
+const MI_PADDING = mi.MI_PADDING;
+const MI_INTPTR_SIZE = mi.MI_INTPTR_SIZE;
 
-const SMALL_PAGES_EMPTY = [1]*mi.page_t{&_page_empty} ** if (mi.PADDING > 0 and mi.INTPTR_SIZE >= 8) 130 else if (mi.PADDING > 0) 131 else 129;
+const MI_KiB = mi.MI_KiB;
+
+const mi_heap_t = mi.mi_heap_t;
+const mi_page_t = mi.mi_page_t;
+const mi_tld_t = mi.mi_tld_t;
+const mi_stats_t = mi.mi_stats_t;
+const mi_page_queue_t = mi.mi_page_queue_t;
+const _mi_thread_id = mi._mi_thread_id;
+const mi_option_t = mi.mi_option_t;
+const mi_span_queue_t = mi.mi_span_queue_t;
+
+const mi_heap_is_initialized = mi.mi_heap_is_initialized;
+
+const _mi_stat_increase = mi._mi_stat_increase;
+const _mi_stat_decrease = mi._mi_stat_decrease;
+
+const mi_stats_done = mi.mi_stats_done;
+const mi_stats_reset = mi.mi_stats_reset;
+const mi_stats_print = mi.mi_stats_print;
+
+const mi_heap_is_backing = mi.mi_heap_is_backing;
+const mi_heap_delete = mi.mi_heap_delete;
+const mi_heap_collect_abandon = mi.mi_heap_collect_abandon;
+const _mi_heap_destroy_pages = mi._mi_heap_destroy_pages;
+
+const mi_collect = mi.mi_collect;
+
+const _mi_options_init = mi._mi_options_init;
+
+// TODO: const mi_option_is_enabled = mi.mi_option_is_enabled;
+fn mi_option_is_enabled(option: mi_option_t) bool {
+    _ = option;
+    return true;
+}
+// TODO: const mi_option_get = mi.mi_option_get;
+fn mi_option_get(option: mi_option_t) isize {
+    _ = option;
+    return 0;
+}
+
+// TODO: const mi_option_get_clamp = mi.mi_option_get_clamp;
+fn mi_option_get_clamp(option: mi_option_t, min: isize, max: isize) isize {
+    _ = option;
+    _ = min;
+    _ = max;
+    return 0;
+}
+
+const mi_option_reserve_os_memory = mi_option_t.mi_option_reserve_os_memory;
+const mi_option_reserve_huge_os_pages = mi_option_t.mi_option_reserve_huge_os_pages;
+const mi_option_reserve_huge_os_pages_at = mi_option_t.mi_option_reserve_huge_os_pages_at;
+const mi_option_show_stats = mi_option_t.mi_option_show_stats;
+const mi_option_verbose = mi_option_t.mi_option_verbose;
+
+// TODO: const mi_reserve_os_memory = mi.mi_reserve_os_memory;
+fn mi_reserve_os_memory(size: usize, commit: bool, allow_large: bool) i32 {
+    _ = size;
+    _ = commit;
+    _ = allow_large;
+    return 0;
+}
+
+// TODO: const mi_reserve_huge_os_pages_at = mi.mi_reserve_huge_os_pages_at;
+fn mi_reserve_huge_os_pages_at(pages: isize, numa_node: i32, timeout_msecs: usize) i32 {
+    _ = pages;
+    _ = numa_node;
+    _ = timeout_msecs;
+    return 0;
+}
+
+// TODO: const mi_reserve_huge_os_pages_interleave = mi.mi_reserve_huge_os_pages_interleave;
+fn mi_reserve_huge_os_pages_interleave(pages: isize, numa_node: i32, timeout_msecs: usize) i32 {
+    _ = pages;
+    _ = numa_node;
+    _ = timeout_msecs;
+    return 0;
+}
+
+// Empty page used to initialize the small free pages array
+const _mi_page_empty: mi_page_t = .{};
+
+const MI_SMALL_PAGES_EMPTY = [1]*mi_page_t{&_mi_page_empty} ** if (MI_PADDING > 0 and MI_INTPTR_SIZE >= 8) 130 else if (MI_PADDING > 0) 131 else 129;
 
 // Empty page queues for every bin
-fn QNULL(comptime sz: usize) mi.page_queue_t {
+fn QNULL(comptime sz: usize) mi_page_queue_t {
     return .{ .block_size = sz * @sizeOf(usize) };
 }
 
-const PAGE_QUEUES_EMPTY = [_]mi.page_queue_t{
+const MI_PAGE_QUEUES_EMPTY = [_]mi_page_queue_t{
     QNULL(1),
     QNULL(1), QNULL(2), QNULL(3), QNULL(4), QNULL(5), QNULL(6), QNULL(7), QNULL(8), // 8
     QNULL(10), QNULL(12), QNULL(14), QNULL(16), QNULL(20), QNULL(24), QNULL(28), QNULL(32), // 16
@@ -41,16 +124,16 @@ const PAGE_QUEUES_EMPTY = [_]mi.page_queue_t{
     QNULL(10240), QNULL(12288), QNULL(14336), QNULL(16384), QNULL(20480), QNULL(24576), QNULL(28672), QNULL(32768), // 56
     QNULL(40960), QNULL(49152), QNULL(57344), QNULL(65536), QNULL(81920), QNULL(98304), QNULL(114688), QNULL(131072), // 64
     QNULL(163840), QNULL(196608), QNULL(229376), QNULL(262144), QNULL(327680), QNULL(393216), QNULL(458752), QNULL(524288), // 72
-    QNULL(mi.MEDIUM_OBJ_WSIZE_MAX + 1), // 655360, Huge queue
-    QNULL(mi.MEDIUM_OBJ_WSIZE_MAX + 2), // full queue
+    QNULL(mi.MI_MEDIUM_OBJ_WSIZE_MAX + 1), // 655360, Huge queue
+    QNULL(mi.MI_MEDIUM_OBJ_WSIZE_MAX + 2), // full queue
 };
 
 // Empty slice span queues for every bin
-fn SQNULL(comptime sz: usize) mi.span_queue_t {
+fn SQNULL(comptime sz: usize) mi_span_queue_t {
     return .{ .slice_count = sz };
 }
 
-const SEGMENT_SPAN_QUEUES_EMPTY = [_]mi.span_queue_t{
+const MI_SEGMENT_SPAN_QUEUES_EMPTY = [_]mi_span_queue_t{
     SQNULL(1),
     SQNULL(1), SQNULL(2), SQNULL(3), SQNULL(4), SQNULL(5), SQNULL(6), SQNULL(7), SQNULL(10), // 8
     SQNULL(12), SQNULL(14), SQNULL(16), SQNULL(20), SQNULL(24), SQNULL(28), SQNULL(32), SQNULL(40), // 16
@@ -69,51 +152,51 @@ const SEGMENT_SPAN_QUEUES_EMPTY = [_]mi.span_queue_t{
 // --------------------------------------------------------
 
 // Should have been const but zig does not allow casting away const
-pub var _heap_empty: mi.heap_t = .{ .random = undefined };
+pub var _mi_heap_empty: mi_heap_t = .{ .random = undefined };
 
 // the thread-local default heap for allocation
-threadlocal var _heap_default: *mi.heap_t = &_heap_empty;
+threadlocal var _mi_heap_default: *mi_heap_t = &_mi_heap_empty;
 
-pub fn get_default_heap() *mi.heap_t {
-    return _heap_default;
+pub fn mi_get_default_heap() *mi_heap_t {
+    return _mi_heap_default;
 }
 
-const tld_empty = mi.tld_t{
-    .segments = .{ .spans = SEGMENT_SPAN_QUEUES_EMPTY },
+const mi_tld_empty = mi_tld_t{
+    .segments = .{ .spans = MI_SEGMENT_SPAN_QUEUES_EMPTY },
 };
 
-var tld_main = mi.tld_t{
-    .heap_backing = &_heap_main,
-    .heaps = &_heap_main,
-    //    .segments = .{ .spans = SEGMENT_SPAN_QUEUES_EMPTY, .stats = &tld_main.stats, .os = &tld_main.os }
-    .segments = .{ .spans = SEGMENT_SPAN_QUEUES_EMPTY },
-    // .os = .{ .stats = &tld_main.stats }, // os
+var mi_tld_main = mi_tld_t{
+    .heap_backing = &_mi_heap_main,
+    .heaps = &_mi_heap_main,
+    //    .segments = .{ .spans = MI_SEGMENT_SPAN_QUEUES_EMPTY, .stats = &mi_tld_main.stats, .os = &mi_tld_main.os }
+    .segments = .{ .spans = MI_SEGMENT_SPAN_QUEUES_EMPTY },
+    // .os = .{ .stats = &mi_tld_main.stats }, // os
 };
 
-var _heap_main = mi.heap_t{
-    .pages = PAGE_QUEUES_EMPTY,
+var _mi_heap_main = mi_heap_t{
+    .pages = MI_PAGE_QUEUES_EMPTY,
     .random = undefined, // TODO
 };
 
-var _process_is_initialized = false; // set to `true` in `process_init`.
+var _mi_process_is_initialized = false; // set to `true` in `process_init`.
 
-pub var _stats_main = mi.stats_t{};
+pub var _mi_stats_main = mi_stats_t{};
 
-fn heap_main_init() void {
-    if (_heap_main.cookie == 0) {
-        _heap_main.tld = &tld_main;
-        _heap_main.thread_id = Thread.getCurrentId();
+fn mi_heap_main_init() void {
+    if (_mi_heap_main.cookie == 0) {
+        _mi_heap_main.tld = &mi_tld_main;
+        _mi_heap_main.thread_id = _mi_thread_id();
         var rng = Prng.init(crandom.int(u64));
-        _heap_main.random = rng.random();
-        _heap_main.cookie = _heap_main.random.int(u64);
-        _heap_main.keys[0] = _heap_main.random.int(u64);
-        _heap_main.keys[1] = _heap_main.random.int(u64);
+        _mi_heap_main.random = rng.random();
+        _mi_heap_main.cookie = _mi_heap_main.random.int(u64);
+        _mi_heap_main.keys[0] = _mi_heap_main.random.int(u64);
+        _mi_heap_main.keys[1] = _mi_heap_main.random.int(u64);
     }
 }
 
-fn _heap_main_get() *mi.heap_t {
-    heap_main_init();
-    return &_heap_main;
+fn _mi_heap_main_get() *mi_heap_t {
+    mi_heap_main_init();
+    return &_mi_heap_main;
 }
 
 // -----------------------------------------------------------
@@ -121,9 +204,9 @@ fn _heap_main_get() *mi.heap_t {
 //-----------------------------------------------------------
 
 // note: in x64 in release build `sizeof(thread_data_t)` is under 4KiB (= OS page size).
-const thread_data_t = struct {
-    heap: mi.heap_t, // must come first due to cast in `_heap_done`
-    tld: mi.tld_t,
+const mi_thread_data_t = struct {
+    heap: mi_heap_t, // must come first due to cast in `_heap_done`
+    tld: mi_tld_t,
 };
 
 // Thread meta-data is allocated directly from the OS. For
@@ -132,16 +215,16 @@ const thread_data_t = struct {
 // per thread so we maintain a small cache of recently freed metadata.
 
 const TD_CACHE_SIZE = 8;
-var td_cache = [_]?*thread_data_t{null} ** TD_CACHE_SIZE;
+var td_cache = [_]?*mi_thread_data_t{null} ** TD_CACHE_SIZE;
 
-fn thread_data_alloc() *thread_data_t {
+fn mi_thread_data_alloc() *mi_thread_data_t {
     // try to find thread metadata in the cache
-    var td: ?*thread_data_t = null;
+    var td: ?*mi_thread_data_t = null;
     var i: usize = 0;
     while (i < TD_CACHE_SIZE) : (i += 1) {
-        td = @atomicLoad(?*thread_data_t, &td_cache[i], AtomicOrder.Monotonic);
+        td = @atomicLoad(?*mi_thread_data_t, &td_cache[i], AtomicOrder.Monotonic);
         if (td != null) {
-            td = @atomicRmw(?*thread_data_t, &td_cache[i], AtomicRmwOp.Xchg, null, AtomicOrder.Monotonic);
+            td = @atomicRmw(?*mi_thread_data_t, &td_cache[i], AtomicRmwOp.Xchg, null, AtomicOrder.Monotonic);
             if (td != null) {
                 return td.?;
             }
@@ -149,21 +232,21 @@ fn thread_data_alloc() *thread_data_t {
     }
     // if that fails, allocate directly from the OS
     const page_allocator = std.heap.page_allocator;
-    td = page_allocator.create(thread_data_t) catch null;
+    td = page_allocator.create(mi_thread_data_t) catch null;
     if (td == null) {
         // if this fails, try once more. (issue #257)
-        td = page_allocator.create(thread_data_t) catch unreachable;
+        td = page_allocator.create(mi_thread_data_t) catch unreachable;
     }
     return td.?;
 }
 
-fn thread_data_free(tdfree: *thread_data_t) void {
+fn mi_thread_data_free(tdfree: *mi_thread_data_t) void {
     // try to add the thread metadata to the cache
     var i: usize = 0;
     while (i < TD_CACHE_SIZE) : (i += 1) {
-        var td: ?*thread_data_t = @atomicLoad(thread_data_t, &td_cache[i], builtin.Monotonic);
+        var td: ?*mi_thread_data_t = @atomicLoad(mi_thread_data_t, &td_cache[i], builtin.Monotonic);
         if (td == null) {
-            const prev = @atomicRmw(thread_data_t, &td_cache[i], builtin.Xchg, tdfree, builtin.Monotonic);
+            const prev = @atomicRmw(mi_thread_data_t, &td_cache[i], builtin.Xchg, tdfree, builtin.Monotonic);
             if (prev == null) {
                 return;
             }
@@ -175,13 +258,13 @@ fn thread_data_free(tdfree: *thread_data_t) void {
     allocator.destory(tdfree);
 }
 
-fn thread_data_collect() void {
+fn mi_thread_data_collect() void {
     // free all thread metadata from the cache
     var i: usize = 0;
     while (i < TD_CACHE_SIZE) : (i += 1) {
-        var td: ?*thread_data_t = @atomicLoad(thread_data_t, &td_cache[i], builtin.Monotonic);
+        var td: ?*mi_thread_data_t = @atomicLoad(mi_thread_data_t, &td_cache[i], builtin.Monotonic);
         if (td != null) {
-            td = @atomicRmw(thread_data_t, &td_cache[i], builtin.Xchg, null, builtin.Monotonic);
+            td = @atomicRmw(mi_thread_data_t, &td_cache[i], builtin.Xchg, null, builtin.Monotonic);
             if (td != null) {
                 const page_allocator = std.heap.page_allocator;
                 var allocator = page_allocator.allocator();
@@ -192,17 +275,17 @@ fn thread_data_collect() void {
 }
 
 // Initialize the thread local default heap, called from `thread_init`
-fn _heap_init() bool {
-    if (get_default_heap().is_initialized()) return true;
-    if (_is_main_thread()) {
+fn _mi_heap_init() bool {
+    if (mi_get_default_heap().is_initialized()) return true;
+    if (_mi_is_main_thread()) {
         // assert_internal(_heap_main.thread_id != 0);  // can happen on freeBSD where alloc is called before any initialization
         // the main heap is statically allocated
-        heap_main_init();
-        _heap_set_default_direct(&_heap_main);
-        //assert_internal(_heap_default.tld.heap_backing == get_default_heap());
+        mi_heap_main_init();
+        _mi_heap_set_default_direct(&_mi_heap_main);
+        //assert_internal(_mi_heap_default.tld.heap_backing == get_default_heap());
     } else {
         // use `_os_alloc` to allocate directly from the OS
-        var td: *thread_data_t = thread_data_alloc();
+        var td: *mi_thread_data_t = mi_thread_data_alloc();
 
         // OS allocated so already zero initialized
         var tld = &td.tld;
@@ -219,57 +302,57 @@ fn _heap_init() bool {
         tld.segments.stats = &tld.stats;
         tld.segments.os = &tld.os;
         tld.os.stats = &tld.stats;
-        _heap_set_default_direct(heap);
+        _mi_heap_set_default_direct(heap);
     }
     return false;
 }
 
 // Free the thread local default heap (called from `thread_done`)
-fn _heap_done(heap: *mi.heap_t) bool {
-    if (!mi.heap_is_initialized(heap)) return true;
+fn _mi_heap_done(heap: *mi_heap_t) bool {
+    if (!mi_heap_is_initialized(heap)) return true;
 
     // reset default heap
-    _heap_set_default_direct(if (_is_main_thread()) &_heap_main else &_heap_empty);
+    _mi_heap_set_default_direct(if (_mi_is_main_thread()) &_mi_heap_main else &_mi_heap_empty);
 
     // switch to backing heap
     heap = heap.tld.heap_backing;
-    if (!mi.heap_is_initialized(heap)) return false;
+    if (!mi_heap_is_initialized(heap)) return false;
 
     // delete all non-backing heaps in this thread
     var curr = heap.tld.heaps;
     while (curr != null) {
         var next = curr.next; // save `next` as `curr` will be freed
         if (curr != heap) {
-            assert(!mi.heap_is_backing(curr));
-            mi.mi_heap_delete(curr);
+            assert(!mi_heap_is_backing(curr));
+            mi_heap_delete(curr);
         }
         curr = next;
     }
     assert(heap.tld.heaps == heap and heap.next == null);
-    assert(mi.heap_is_backing(heap));
+    assert(mi_heap_is_backing(heap));
 
     // collect if not the main thread
-    if (heap != &_heap_main) {
-        mi.mi_heap_collect_abandon(heap);
+    if (heap != &_mi_heap_main) {
+        mi_heap_collect_abandon(heap);
     }
 
     // merge stats
-    mi.mi_stats_done(&heap.tld.stats);
+    mi_stats_done(&heap.tld.stats);
 
     // free if not the main thread
-    if (heap != &_heap_main) {
+    if (heap != &_mi_heap_main) {
         // the following assertion does not always hold for huge segments as those are always treated
         // as abondened: one may allocate it in one thread, but deallocate in another in which case
         // the count can be too large or negative. todo: perhaps not count huge segments? see issue #363
         // assert_internal(heap.tld.segments.count == 0 || heap.thread_id != Thread.getCurrentId());
-        thread_data_free(heap);
+        mi_thread_data_free(heap);
     } else {
-        thread_data_collect(); // free cached thread metadata
+        mi_thread_data_collect(); // free cached thread metadata
         if (0) {
             // never free the main thread even in debug mode; if a dll is linked statically with mimalloc,
             // there may still be delete/free calls after the fls_done is called. Issue #207
-            mi._heap_destroy_pages(heap);
-            assert(heap.tld.heap_backing == &_heap_main);
+            _mi_heap_destroy_pages(heap);
+            assert(heap.tld.heap_backing == &_mi_heap_main);
         }
     }
     return false;
@@ -291,129 +374,127 @@ fn _heap_done(heap: *mi.heap_t) bool {
 // to set up the thread local keys.
 // --------------------------------------------------------
 
-pub fn _is_main_thread() bool {
-    return (_heap_main.thread_id == 0 or _heap_main.thread_id == Thread.getCurrentId());
+pub fn _mi_is_main_thread() bool {
+    return (_mi_heap_main.thread_id == 0 or _mi_heap_main.thread_id == _mi_thread_id());
 }
 
 var thread_count: Atomic(usize) = Atomic(usize).init(0);
 
-fn _current_thread_count() usize {
+pub fn _mi_current_thread_count() usize {
     return thread_count.load();
 }
 
 // This is called from the `malloc_generic`
-pub fn thread_init() void {
+pub fn mi_thread_init() void {
     // ensure our process has started already
-    process_init();
+    mi_process_init();
 
     // initialize the thread local default heap
     // (this will call `_heap_set_default_direct` and thus set the
     //  fiber/pthread key to a non-zero value, ensuring `_thread_done` is called)
-    if (_heap_init()) return; // returns true if already initialized
+    if (_mi_heap_init()) return; // returns true if already initialized
 
-    mi.mi_stat_increase(&_stats_main.threads, 1);
+    _mi_stat_increase(&_mi_stats_main.threads, 1);
     _ = thread_count.fetchAdd(1, AtomicOrder.Monotonic);
     //_verbose_message("thread init: 0x%zx\n", Thread.getCurrentId());
 }
 
-pub fn thread_done() void {
-    _thread_done(mi.get_default_heap());
+pub fn mi_thread_done() void {
+    _mi_thread_done(mi_get_default_heap());
 }
 
-pub fn _thread_done(heap: *mi.heap_t) void {
+pub fn _mi_thread_done(heap: *mi_heap_t) void {
     thread_count.decrement();
-    mi._stat_decrease(&_stats_main.threads, 1);
+    _mi_stat_decrease(&_mi_stats_main.threads, 1);
 
     // check thread-id as on Windows shutdown with FLS the main (exit) thread may call this on thread-local heaps...
-    if (heap.thread_id != Thread.getCurrentId()) return;
+    if (heap.thread_id != _mi_thread_id()) return;
 
     // abandon the thread local heap
-    if (_heap_done(heap)) return; // returns true if already ran
+    if (_mi_heap_done(heap)) return; // returns true if already ran
 }
 
-pub fn _heap_set_default_direct(heap: *mi.heap_t) void {
-    _heap_default = heap;
+pub fn _mi_heap_set_default_direct(heap: *mi_heap_t) void {
+    _mi_heap_default = heap;
 }
 
 // --------------------------------------------------------
 // Run functions on process init/done, and thread init/done
 // --------------------------------------------------------
 var os_preloading: bool = true; // true until this module is initialized
-var redirected: bool = false; // true if malloc redirects to malloc
+var mi_redirected: bool = false; // true if malloc redirects to malloc
 
 // Returns true if this module has not been initialized; Don't use C runtime routines until it returns false.
-fn _preloading() bool {
+fn mi_preloading() bool {
     return os_preloading;
 }
 
-fn is_redirected() bool {
-    return redirected;
+fn mi_is_redirected() bool {
+    return mi_redirected;
 }
 
 // Called once by the process loader
-fn process_load() void {
-    heap_main_init();
+fn mi_process_load() void {
+    mi_heap_main_init();
     os_preloading = false;
-    mi._options_init();
-    process_init();
+    _mi_options_init();
+    mi_process_init();
     //stats_reset();-
 }
 
 // Initialize the process; called by thread_init or the process loader
-pub fn process_init() void {
+pub fn mi_process_init() void {
     // ensure we are called once
-    if (_process_is_initialized) return;
+    if (_mi_process_is_initialized) return;
     std.log.debug("process init: 0x{}", .{Thread.getCurrentId()});
-    _process_is_initialized = true;
+    _mi_process_is_initialized = true;
 
-    // TODO: os.zig: mi._os_init();
-    heap_main_init();
-    if (mi.DEBUG > 0)
-        std.log.debug("debug level: {}", .{mi.DEBUG});
-    std.log.debug("secure level: {}", .{mi.SECURE});
-    thread_init();
+    // TODO: os.zig: mi_os_init();
+    mi_heap_main_init();
+    if (MI_DEBUG > 0)
+        std.log.debug("debug level: {}", .{MI_DEBUG});
+    std.log.debug("secure level: {}", .{MI_SECURE});
+    mi_thread_init();
 
-    mi.mi_stats_reset(); // only call stat reset *after* thread init (or the heap tld == NULL)
+    mi_stats_reset(); // only call stat reset *after* thread init (or the heap tld == NULL)
 
-    // TODO: options.zig: if (mi.option_is_enabled(mi.option_reserve_huge_os_pages)) {
-    if (false) {
-        const pages = mi.option_get_clamp(mi.option_reserve_huge_os_pages, 0, 128 * 1024);
-        const reserve_at = mi.option_get(mi.option_reserve_huge_os_pages_at);
+    if (mi_option_is_enabled(mi_option_reserve_huge_os_pages)) {
+        const pages = mi_option_get_clamp(mi_option_reserve_huge_os_pages, 0, 128 * 1024);
+        const reserve_at = mi_option_get(mi_option_reserve_huge_os_pages_at);
         if (reserve_at != -1) {
-            mi.reserve_huge_os_pages_at(pages, reserve_at, pages * 500);
+            _ = mi_reserve_huge_os_pages_at(pages, @intCast(i32, reserve_at), @intCast(usize, pages) * 500);
         } else {
-            mi.reserve_huge_os_pages_interleave(pages, 0, pages * 500);
+            _ = mi_reserve_huge_os_pages_interleave(pages, 0, @intCast(usize, pages) * 500);
         }
     }
-    // TODO: options.zig: if (mi.option_is_enabled(mi.option_reserve_os_memory)) {
-    if (false) {
-        const ksize = mi.option_get(mi.option_reserve_os_memory);
+    if (mi_option_is_enabled(mi_option_reserve_os_memory)) {
+        const ksize = mi_option_get(mi_option_reserve_os_memory);
         if (ksize > 0) {
-            mi.reserve_os_memory(ksize * mi.KiB, true, true);
+            _ = mi_reserve_os_memory(@intCast(usize, ksize) * MI_KiB, true, true);
         }
     }
 }
 
-var is_process_done: bool = false;
-const SHARED_LIB = false;
+var mi_is_process_done: bool = false;
+const MI_SHARED_LIB = false;
 
 // Called when the process is done (through `at_exit`)
-pub fn process_done() void {
+pub fn mi_process_done() void {
     // only shutdown if we were initialized
-    if (!_process_is_initialized) return;
+    if (!_mi_process_is_initialized) return;
     // ensure we are called once
-    if (process_done) return;
-    process_done = true;
+    if (mi_process_done) return;
+    mi_process_done = true;
 
-    if (mi.DEBUG != 0 or !SHARED_LIB) {
+    if (MI_DEBUG != 0 or !MI_SHARED_LIB) {
         // free all memory if possible on process exit. This is not needed for a stand-alone process
         // but should be done if mimalloc is statically linked into another shared library which
         // is repeatedly loaded/unloaded, see issue #281.
-        mi.collect(true); // force
+        mi_collect(true); // force
     }
-    if (mi.option_is_enabled(mi.option_show_stats) || mi.option_is_enabled(mi.option_verbose)) {
-        mi.stats_print(null);
+    if (mi_option_is_enabled(mi_option_show_stats) || mi_option_is_enabled(mi_option_verbose)) {
+        mi_stats_print(null);
     }
-    std.log.debug("process done: 0x{:x}", .{_heap_main.thread_id});
+    std.log.debug("process done: 0x{:x}", .{_mi_heap_main.thread_id});
     os_preloading = true; // don't call the C runtime anymore
 }
