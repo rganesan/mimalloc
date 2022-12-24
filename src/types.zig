@@ -586,18 +586,13 @@ pub const mi_option_t = enum {
     mi_option_show_stats,
     mi_option_verbose,
     // some of the following options are experimental
-    // (deprecated options are kept for binary backward compatibility with v1.x versions)
     mi_option_eager_commit,
-    mi_option_deprecated_eager_region_commit,
-    mi_option_deprecated_reset_decommits,
     mi_option_large_os_pages, // use large (2MiB) OS pages, implies eager commit
     mi_option_reserve_huge_os_pages, // reserve N huge OS pages (1GiB) at startup
     mi_option_reserve_huge_os_pages_at, // reserve huge OS pages at a specific NUMA node
     mi_option_reserve_os_memory, // reserve specified amount of OS memory at startup
-    mi_option_deprecated_segment_cache,
     mi_option_page_reset,
     mi_option_abandoned_page_decommit,
-    mi_option_deprecated_segment_reset,
     mi_option_eager_commit_delay,
     mi_option_decommit_delay,
     mi_option_use_numa_nodes, // 0 = use available numa nodes, otherwise use at most N nodes.
