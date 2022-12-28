@@ -13,6 +13,7 @@ const mi = struct {
     usingnamespace @import("types.zig");
     usingnamespace @import("heap.zig");
     usingnamespace @import("stats.zig");
+    usingnamespace @import("options.zig");
 };
 const assert = std.debug.assert;
 const Atomic = std.atomic.Atomic;
@@ -54,24 +55,9 @@ const mi_collect = mi.mi_collect;
 
 const _mi_options_init = mi._mi_options_init;
 
-// TODO: const mi_option_is_enabled = mi.mi_option_is_enabled;
-fn mi_option_is_enabled(option: mi_option_t) bool {
-    _ = option;
-    return true;
-}
-// TODO: const mi_option_get = mi.mi_option_get;
-fn mi_option_get(option: mi_option_t) isize {
-    _ = option;
-    return 0;
-}
-
-// TODO: const mi_option_get_clamp = mi.mi_option_get_clamp;
-fn mi_option_get_clamp(option: mi_option_t, min: isize, max: isize) isize {
-    _ = option;
-    _ = min;
-    _ = max;
-    return 0;
-}
+const mi_option_is_enabled = mi.mi_option_is_enabled;
+const mi_option_get = mi.mi_option_get;
+const mi_option_get_clamp = mi.mi_option_get_clamp;
 
 const mi_option_reserve_os_memory = mi_option_t.mi_option_reserve_os_memory;
 const mi_option_reserve_huge_os_pages = mi_option_t.mi_option_reserve_huge_os_pages;
@@ -104,7 +90,7 @@ fn mi_reserve_huge_os_pages_interleave(pages: isize, numa_node: i32, timeout_mse
 }
 
 // Empty page used to initialize the small free pages array
-const _mi_page_empty: mi_page_t = .{};
+pub var _mi_page_empty: mi_page_t = mi_page_t.init();
 
 const MI_SMALL_PAGES_EMPTY = [1]*mi_page_t{&_mi_page_empty} ** if (MI_PADDING > 0 and MI_INTPTR_SIZE >= 8) 130 else if (MI_PADDING > 0) 131 else 129;
 
@@ -173,7 +159,7 @@ var mi_tld_main = mi_tld_t{
     // .os = .{ .stats = &mi_tld_main.stats }, // os
 };
 
-var _mi_heap_main = mi_heap_t{
+pub var _mi_heap_main = mi_heap_t{
     .pages = MI_PAGE_QUEUES_EMPTY,
     .random = undefined, // TODO
 };
@@ -381,7 +367,7 @@ pub fn _mi_is_main_thread() bool {
 var thread_count: Atomic(usize) = Atomic(usize).init(0);
 
 pub fn _mi_current_thread_count() usize {
-    return thread_count.load();
+    return thread_count.load(AtomicOrder.Monotonic);
 }
 
 // This is called from the `malloc_generic`
@@ -425,7 +411,7 @@ var os_preloading: bool = true; // true until this module is initialized
 var mi_redirected: bool = false; // true if malloc redirects to malloc
 
 // Returns true if this module has not been initialized; Don't use C runtime routines until it returns false.
-fn mi_preloading() bool {
+pub fn _mi_preloading() bool {
     return os_preloading;
 }
 
@@ -446,7 +432,7 @@ fn mi_process_load() void {
 pub fn mi_process_init() void {
     // ensure we are called once
     if (_mi_process_is_initialized) return;
-    std.log.debug("process init: 0x{}", .{Thread.getCurrentId()});
+    std.log.debug("process init: 0x{}", .{_mi_thread_id()});
     _mi_process_is_initialized = true;
 
     // TODO: os.zig: mi_os_init();

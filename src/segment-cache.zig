@@ -17,7 +17,10 @@ const Atomic = std.atomic.Atomic;
 const AtomicOrder = std.builtin.AtomicOrder;
 
 const mi = struct {
+    usingnamespace @import("options.zig");
     usingnamespace @import("types.zig");
+    usingnamespace @import("segment.zig");
+    usingnamespace @import("stats.zig");
 };
 
 const MI_DEBUG = mi.MI_DEBUG;
@@ -43,7 +46,6 @@ const _mi_arena_memid_is_suitable = mi._mi_arena_memid_is_suitable;
 const _mi_ptr_segment = mi._mi_ptr_segment;
 
 const mi_option_is_enabled = mi.mi_option_is_enabled;
-const mi_option_allow_decommit = mi.mi_option_allow_decommit;
 const mi_option_segment_decommit_delay = mi.mi_option_segment_decommit_delay;
 const mi_option_get = mi.mi_option_get;
 
@@ -98,7 +100,7 @@ inline fn mi_unlikely(cond: bool) bool {
 const MI_BITMAP_FIELD_BITS = (8 * MI_SIZE_SIZE);
 const MI_BITMAP_FIELD_FULL = ~@intCast(usize, 0); // all bits set
 
-const MI_CACHE_DISABLE = 0; // define to completely disable the segment cache
+const MI_CACHE_DISABLE = false; // define to completely disable the segment cache
 const MI_CACHE_FIELDS = 16;
 
 const MI_CACHE_MAX = (MI_BITMAP_FIELD_BITS * MI_CACHE_FIELDS); // 1024 on 64-bit
@@ -110,7 +112,7 @@ const mi_bitmap_index_t = usize;
 // #define MI_CACHE_BITS_SET   MI_INIT16(BITS_SET)                          // note: update if MI_CACHE_FIELDS changes
 
 const mi_cache_slot_t = struct {
-    p: *void,
+    p: ?*anyopaque,
     memid: usize,
     is_pinned: bool,
     commit_mask: mi_commit_mask_t,
@@ -118,7 +120,7 @@ const mi_cache_slot_t = struct {
     expire: Atomic(mi_msecs_t),
 };
 
-var cache = std.mem.zeros([MI_CACHE_MAX]mi_cache_slot_t);
+var cache = std.mem.zeroes([MI_CACHE_MAX]mi_cache_slot_t);
 const mi_bitmap_field_t = Atomic(usize);
 const mi_bitmap_t = *mi_bitmap_field_t;
 
@@ -132,8 +134,8 @@ inline fn mi_bitmap_index_bit(bitmap_idx: mi_bitmap_index_t) usize {
     return bitmap_idx;
 }
 
-fn mi_segment_cache_is_suitable(bitidx: mi_bitmap_index_t, arg: *opaque {}) bool {
-    const req_arena_id = @ptrCast(*mi_arena_id_t, arg).*;
+fn mi_segment_cache_is_suitable(bitidx: mi_bitmap_index_t, arg: *anyopaque) bool {
+    const req_arena_id = @ptrCast(*mi_arena_id_t, @alignCast(@alignOf(mi_arena_id_t), arg)).*;
     const slot = &cache[mi_bitmap_index_bit(bitidx)];
     return _mi_arena_memid_is_suitable(slot.memid, req_arena_id);
 }
@@ -210,15 +212,15 @@ fn mi_commit_mask_decommit(cmask: *mi_commit_mask_t, p: *void, total: usize, sta
 const MI_MAX_PURGE_PER_PUSH = 4;
 
 fn mi_segment_cache_purge(force: bool, tld: *mi_os_tld_t) void {
-    if (!mi_option_is_enabled(mi_option_allow_decommit)) return;
+    if (!mi_option_is_enabled(.mi_option_allow_decommit)) return;
     const now = _mi_clock_now();
     var purged: usize = 0;
-    const max_visits = if (force)
+    const max_visits: usize = if (force)
         MI_CACHE_MAX // visit all
     else
         MI_CACHE_FIELDS; // probe at most N (=16) slots
 
-    var idx: usize = if (force) 0 else _mi_random_shuffle(now) % MI_CACHE_MAX; // random start
+    var idx: usize = if (force) 0 else _mi_random_shuffle(@intCast(u64, now)) % MI_CACHE_MAX; // random start
     var visited: usize = 0;
     while (visited < max_visits) : (visited += 1) { // visit N slots
         if (idx >= MI_CACHE_MAX) idx = 0; // wrap
@@ -253,7 +255,7 @@ pub fn _mi_segment_cache_collect(force: bool, tld: *mi_os_tld_t) void {
     mi_segment_cache_purge(force, tld);
 }
 
-pub fn _mi_segment_cache_push(start: *void, size: usize, memid: usize, commit_mask: *const mi_commit_mask_t, decommit_mask: *const mi_commit_mask_t, is_large: bool, is_pinned: bool, tld: *mi_os_tld_t) bool {
+pub fn _mi_segment_cache_push(start: *mi_segment_t, size: usize, memid: usize, commit_mask: *const mi_commit_mask_t, decommit_mask: *const mi_commit_mask_t, is_large: bool, is_pinned: bool, tld: *mi_os_tld_t) bool {
     if (MI_CACHE_DISABLE) return false;
 
     // only for normal segment blocks
@@ -290,7 +292,7 @@ pub fn _mi_segment_cache_push(start: *void, size: usize, memid: usize, commit_ma
     mi_atomic_storei64_relaxed(&slot.expire, 0);
     slot.commit_mask = commit_mask.*;
     slot.decommit_mask = decommit_mask.*;
-    if (!mi_commit_mask_is_empty(commit_mask) and !is_large and !is_pinned and mi_option_is_enabled(mi_option_allow_decommit)) {
+    if (!mi_commit_mask_is_empty(commit_mask) and !is_large and !is_pinned and mi_option_is_enabled(.mi_option_allow_decommit)) {
         const delay = mi_option_get(mi_option_segment_decommit_delay);
         if (delay == 0) {
             _mi_abandoned_await_readers(); // wait until safe to decommit
@@ -321,7 +323,7 @@ const MI_SEGMENT_MAP_BITS = (MI_MAX_ADDRESS / MI_SEGMENT_SIZE);
 const MI_SEGMENT_MAP_SIZE = (MI_SEGMENT_MAP_BITS / 8);
 const MI_SEGMENT_MAP_WSIZE = (MI_SEGMENT_MAP_SIZE / MI_INTPTR_SIZE);
 
-var mi_segment_map = [1]Atomic(usize).init(0) ** (MI_SEGMENT_MAP_WSIZE + 1); // 2KiB per TB with 64MiB segments
+var mi_segment_map = [1]Atomic(usize){Atomic(usize).init(0)} ** (MI_SEGMENT_MAP_WSIZE + 1); // 2KiB per TB with 64MiB segments
 
 fn mi_segment_map_index_of(segment: *const mi_segment_t, bitidx: *usize) usize {
     mi_assert_internal(_mi_ptr_segment(segment) == segment); // is it aligned on MI_SEGMENT_SIZE?
@@ -349,20 +351,21 @@ fn _mi_segment_map_allocated_at(segment: *const mi_segment_t) void {
     }
 }
 
-fn _mi_segment_map_freed_at(segment: *const mi_segment_t) void {
+pub fn _mi_segment_map_freed_at(segment: *const mi_segment_t) void {
     var bitidx: usize = undefined;
     const index = mi_segment_map_index_of(segment, &bitidx);
     mi_assert_internal(index <= MI_SEGMENT_MAP_WSIZE);
     if (index == MI_SEGMENT_MAP_WSIZE) return;
-    const mask = mi_atomic_load_relaxed(&mi_segment_map[index]);
+    var mask = mi_atomic_load_relaxed(&mi_segment_map[index]);
     while (true) {
-        const newmask = (mask & ~(@intCast(usize, 1) << bitidx));
+        const shl_bits = @intCast(if (@sizeOf(usize) == 8) u6 else u5, bitidx);
+        const newmask = (mask & ~(@intCast(usize, 1) << shl_bits));
         if (mi_atomic_cas_weak_release(&mi_segment_map[index], &mask, newmask)) break;
     }
 }
 
 // Determine the segment belonging to a pointer or null if it is not in a valid segment.
-fn _mi_segment_of(p: *const void) *?mi_segment_t {
+fn _mi_segment_of(p: anytype) *?mi_segment_t {
     var segment = _mi_ptr_segment(p);
     if (segment == null) return null;
     var bitidx: usize = undefined;
@@ -416,10 +419,12 @@ fn _mi_segment_of(p: *const void) *?mi_segment_t {
 }
 
 // Is this a valid pointer in our heap?
-pub fn mi_is_valid_pointer(p: *const void) bool {
-    return (_mi_segment_of(p) != null);
+pub fn mi_is_valid_pointer(p: anytype) bool {
+    _ = p;
+    return true;
+    // TODO: compiler error: return (_mi_segment_of(p) != null);
 }
 
-pub fn mi_is_in_heap_region(p: *const void) bool {
+pub fn mi_is_in_heap_region(p: anytype) bool {
     return mi_is_valid_pointer(p);
 }

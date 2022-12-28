@@ -41,7 +41,7 @@ const _mi_fputs = mi._mi_fputs;
 //  Statistics operations
 //-----------------------------------------------------------
 
-pub fn mi_is_in_main(stat: *const mi_stat_count_t) bool {
+pub fn mi_is_in_main(stat: *const u8) bool {
     return @ptrToInt(stat) >= @ptrToInt(&mi._mi_stats_main) and @ptrToInt(stat) < (@ptrToInt(&mi._mi_stats_main) + @sizeOf(mi_stats_t));
 }
 
@@ -58,7 +58,7 @@ inline fn mi_atomic_maxi64_relaxed(p: *volatile i64, x: i64) void {
 
 fn mi_stat_update(stat: *mi_stat_count_t, amount: i64) void {
     if (amount == 0) return;
-    if (mi_is_in_main(stat)) {
+    if (mi_is_in_main(@ptrCast(*u8, stat))) {
         // add atomically (for abandoned pages)
         const current = @atomicRmw(i64, &stat.current, AtomicRmwOp.Add, amount, AtomicOrder.Monotonic);
         mi_atomic_maxi64_relaxed(&stat.peak, current + amount);
@@ -79,10 +79,10 @@ fn mi_stat_update(stat: *mi_stat_count_t, amount: i64) void {
     }
 }
 
-fn _mi_stat_counter_increase(stat: *mi_stat_counter_t, amount: usize) void {
-    if (mi_is_in_main(stat)) {
-        @atomicRmw(i64, &stat.count, builtin.Add, 1, builtin.Monotonic);
-        @atomicRmw(i64, &stat.total, builtin.Add, @intCast(i64, amount), builtin.Monotonic);
+pub fn _mi_stat_counter_increase(stat: *mi_stat_counter_t, amount: i64) void {
+    if (mi_is_in_main(@ptrCast(*u8, stat))) {
+        _ = @atomicRmw(i64, &stat.count, AtomicRmwOp.Add, 1, AtomicOrder.Monotonic);
+        _ = @atomicRmw(i64, &stat.total, AtomicRmwOp.Add, @intCast(i64, amount), AtomicOrder.Monotonic);
     } else {
         stat.count += 1;
         stat.total += amount;
@@ -437,7 +437,7 @@ fn mi_thread_stats_print_out(out: mi_output_fun, arg: *opaque {}) void {
 // ----------------------------------------------------------------
 // Basic timer for convenience; use milli-seconds to avoid doubles
 // ----------------------------------------------------------------
-fn mi_clock_now() mi_msecs_t {
+pub fn _mi_clock_now() mi_msecs_t {
     return std.time.milliTimestamp();
 }
 
@@ -445,13 +445,13 @@ var mi_clock_diff: mi_msecs_t = 0;
 
 pub fn _mi_clock_start() mi_msecs_t {
     if (mi_clock_diff == 0) {
-        const t0 = mi_clock_now();
-        mi_clock_diff = mi_clock_now() - t0;
+        const t0 = _mi_clock_now();
+        mi_clock_diff = _mi_clock_now() - t0;
     }
-    return mi_clock_now();
+    return _mi_clock_now();
 }
 
 pub fn _mi_clock_end(start: mi_msecs_t) mi_msecs_t {
-    const end = mi_clock_now();
+    const end = _mi_clock_now();
     return end - start - mi_clock_diff;
 }

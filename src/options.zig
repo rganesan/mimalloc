@@ -9,7 +9,7 @@ var mi_max_error_count: isize = 16; // stop outputting errors after this (use < 
 var mi_max_warning_count: isize = 16; // stop outputting warnings after this (use < 0 for no limit)
 
 const std = @import("std");
-const builtin = std.builtin;
+const builtin = @import("builtin");
 const AtomicOrder = builtin.AtomicOrder;
 const AtomicRmwOp = builtin.AtomicRmwOp;
 const assert = std.debug.assert;
@@ -17,6 +17,7 @@ const Atomic = std.atomic.Atomic;
 
 const mi = struct {
     usingnamespace @import("types.zig");
+    usingnamespace @import("init.zig"); // preloading
     usingnamespace @import("heap.zig");
     usingnamespace @import("stats.zig");
     fn noop(cond: bool) void {
@@ -76,9 +77,9 @@ const mi_option_desc_t = struct {
 // #define MI_OPTION(opt)                  mi_option_##opt, #opt, NULL
 // #define MI_OPTION_LEGACY(opt,legacy)    mi_option_##opt, #opt, #legacy
 
-const options = [_]mi_option_desc_t{
+var options = [_]mi_option_desc_t{
     // stable options
-    .{ .value = if (MI_DEBUG or MI_SHOW_ERRORS) 1 else 0, .option = .mi_option_show_errors, .name = "show_errors" },
+    .{ .value = if (MI_DEBUG > 0 or MI_SHOW_ERRORS) 1 else 0, .option = .mi_option_show_errors, .name = "show_errors" },
     .{ .value = 0, .option = .mi_option_show_stats, .name = "show_stats" },
     .{ .value = 0, .option = .mi_option_verbose, .name = "verbose" },
 
@@ -118,9 +119,9 @@ pub fn _mi_options_init() void {
 }
 
 pub fn mi_option_get(option: mi_option_t) isize {
-    mi_assert(option >= 0 and option < ._mi_option_last);
-    if (option < 0 or option >= ._mi_option_last) return 0;
-    const desc = &options[option];
+    mi_assert(@enumToInt(option) >= 0 and @enumToInt(option) < @enumToInt(mi_option_t._mi_option_last));
+    if (@enumToInt(option) >= 0 and @enumToInt(option) < @enumToInt(mi_option_t._mi_option_last)) return 0;
+    const desc = &options[@enumToInt(option)];
     mi_assert(desc.option == option); // index should match the option
     if (mi_unlikely(desc.init == .UNINIT)) {
         mi_option_init(desc);
@@ -265,9 +266,10 @@ var warning_count = Atomic(usize).init(0); // when >= max_warning_count stop emi
 
 fn mi_option_init(desc: *mi_option_desc_t) void {
     // Read option value from the environment
-    var buf = &[64]u8;
-    std.fmt.bufPrint(buf, "mimalloc_{s}", desc.name) orelse unreachable;
-    const env = std.os.getenv(buf);
+    var buf: [64]u8 = undefined;
+    const b = std.fmt.bufPrint(&buf, "mimalloc_{s}", .{desc.name}) catch unreachable;
+    std.debug.print("{}\n", .{@TypeOf(b)});
+    const env = std.os.getenv(b);
 
     if (env != null) {
         if (!_mi_preloading()) {
@@ -276,21 +278,20 @@ fn mi_option_init(desc: *mi_option_desc_t) void {
         return;
     }
 
-    for (env) |c, i| {
+    for (env.?) |c, i| {
         if (i >= buf.len) break;
         buf[i] = std.ascii.toUpper(c);
     }
-    if (env.len < buf.len)
-        buf.len = env.len;
+    const val = buf[0..env.?.len];
 
-    if (buf.len == 0 or std.mem.indexOf(u8, "1;TRUE;YES;ON", buf) != null) {
+    if (val.len == 0 or std.mem.indexOf(u8, "1;TRUE;YES;ON", val) != null) {
         desc.value = 1;
         desc.init = .INITIALIZED;
-    } else if (std.mem.indexOf("0;FALSE;NO;OFF", buf) != null) {
+    } else if (std.mem.indexOf(u8, "0;FALSE;NO;OFF", val) != null) {
         desc.value = 0;
         desc.init = .INITIALIZED;
     } else {
-        const value = std.fmt.parseInt(isize, buf, 0) catch -999999;
+        const value = std.fmt.parseInt(isize, val, 0) catch -999999;
         if (desc.option == .mi_option_reserve_os_memory) {
             // this option is interpreted in KiB to prevent overflow of `long`
             // TODO
@@ -306,7 +307,7 @@ fn mi_option_init(desc: *mi_option_desc_t) void {
             desc.init = .INITIALIZED;
         } else {
             desc.init = .DEFAULTED;
-            std.log.warn("environment option mimalloc_{} has an invalid value.\n", .{desc.name});
+            std.log.warn("environment option mimalloc_{s} has an invalid value.\n", .{desc.name});
         }
     }
     mi_assert_internal(desc.init != .UNINIT);

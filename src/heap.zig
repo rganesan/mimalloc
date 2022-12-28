@@ -15,21 +15,48 @@ const mi = struct {
     usingnamespace @import("types.zig");
     usingnamespace @import("init.zig");
     usingnamespace @import("stats.zig");
-    // usingnamespace @import("options.zig");
+    usingnamespace @import("options.zig");
+
+    fn noop(cond: bool) void {
+        _ = cond;
+    }
 };
 
-const MI_DEBUG = mi.MI_DEBUG;
-const MI_BIN_FULL = mi.MI_BIN_FULL;
+const mi_assert = assert;
+const mi_assert_internal = if (MI_DEBUG > 1) mi_assert else mi.noop;
+const mi_assert_expensive = if (MI_DEBUG > 2) mi_assert else mi.noop;
 
+// Types
 const mi_heap_t = mi.mi_heap_t;
 const mi_page_t = mi.mi_page_t;
 const mi_page_queue_t = mi.mi_page_queue_t;
 
+// #defines
+const MI_DEBUG = mi.MI_DEBUG;
+const MI_BIN_FULL = mi.MI_BIN_FULL;
+const MI_PAGES_DIRECT = mi.MI_PAGES_DIRECT;
+const MI_SMALL_SIZE_MAX = mi.MI_SMALL_SIZE_MAX;
+const MI_PADDING_SIZE = mi.MI_PADDING_SIZE;
+
+// Function aliases
 const _mi_heap_set_default_direct = mi._mi_heap_set_default_direct;
+const _mi_wsize_from_size = mi._mi_wsize_from_size;
 
 const NDEBUG = false;
 const Arg1 = opaque {};
 const Arg2 = opaque {};
+
+// inlines from mimalloc-internal.h
+pub inline fn mi_heap_is_initialized(heap: *mi_heap_t) bool {
+    return (heap != &mi._mi_heap_empty);
+}
+
+pub inline fn _mi_heap_get_free_small_page(heap: *mi_heap_t, size: usize) *mi_page_t {
+    mi_assert_internal(size <= (MI_SMALL_SIZE_MAX + MI_PADDING_SIZE));
+    const idx = _mi_wsize_from_size(size);
+    mi_assert_internal(idx < MI_PAGES_DIRECT);
+    return heap.pages_free_direct[idx];
+}
 
 //- -----------------------------------------------------------
 //  Helpers
@@ -169,8 +196,8 @@ fn _mi_heap_collect_abandon(heap: *mi_heap_t) void {
     mi_heap_collect_ex(heap, .MI_ABANDON);
 }
 
-fn mi_heap_collect(heap: *mi_heap_t, force: bool) void {
-    mi_heap_collect_ex(heap, if (force) ?.MI_FORCE else .MI_NORMAL);
+pub fn mi_heap_collect(heap: *mi_heap_t, force: bool) void {
+    mi_heap_collect_ex(heap, if (force) .MI_FORCE else .MI_NORMAL);
 }
 
 fn mi_collect(force: bool) void {
@@ -213,15 +240,22 @@ pub fn mi_heap_new() *mi_heap_t {
     return mi_heap_new_in_arena(mi.ARENA_ID_NONE);
 }
 
-fn _mi_heap_memid_is_suitable(heap: *mi_heap_t, memid: usize) bool {
-    return mi._mi_arena_memid_is_suitable(memid, heap.arena_id);
+pub fn _mi_heap_memid_is_suitable(heap: *mi_heap_t, memid: usize) bool {
+    _ = heap;
+    _ = memid;
+    return true; // TODO - arena.zig
+    // return mi._mi_arena_memid_is_suitable(memid, heap.arena_id);
+}
+
+pub fn _mi_heap_random_next(heap: *mi_heap_t) usize {
+    return heap.random.int(usize);
 }
 
 // zero out the page queues
 fn mi_heap_reset_pages(heap: *mi_heap_t) void {
     assert(heap.is_initialized());
     for (heap.pages_free_direct) |_, i| {
-        heap.pages_free_direct[i] = null;
+        heap.pages_free_direct[i] = &mi._mi_page_empty;
     }
     heap.pages = mi._mi_heap_empty.pages;
     heap.thread_delayed_free.store(null, AtomicOrder.Monotonic); // TODO: Check order

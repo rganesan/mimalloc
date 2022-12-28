@@ -5,11 +5,18 @@
 
 const std = @import("std");
 const builtin = std.builtin;
+const mem = std.mem;
+const os = std.os;
 const assert = std.debug.assert;
 const AtomicOrder = builtin.AtomicOrder;
 const Atomic = std.atomic.Atomic;
 const Random = std.rand.Random;
 const Prng = std.rand.DefaultPrng;
+
+const mi = struct {
+    usingnamespace @import("types.zig");
+    usingnamespace @import("init.zig");
+};
 
 const mi_assert = std.debug.assert;
 
@@ -23,10 +30,6 @@ pub inline fn _mi_wsize_from_size(size: usize) usize {
     mi_assert(size <= std.math.maxInt(usize) - @sizeOf(usize));
     return (size + @sizeOf(usize) - 1) / @sizeOf(usize);
 }
-
-const mi = struct {
-    usingnamespace @import("init.zig");
-};
 
 // ------------------------------------------------------
 // Extended functionality
@@ -126,7 +129,7 @@ pub const MI_MEDIUM_PAGE_SHIFT = 3 + MI_SMALL_PAGE_SHIFT; // 512KiB
 // Derived constants
 pub const MI_SEGMENT_SIZE = 1 << MI_SEGMENT_SHIFT;
 pub const MI_SEGMENT_ALIGN = MI_SEGMENT_SIZE;
-pub const MI_SEGMENT_MASK = MI_SEGMENT_SIZE - 1;
+pub const MI_SEGMENT_MASK = @intCast(usize, MI_SEGMENT_SIZE - 1);
 pub const MI_SEGMENT_SLICE_SIZE = 1 << MI_SEGMENT_SLICE_SHIFT;
 pub const MI_SLICES_PER_SEGMENT = MI_SEGMENT_SIZE / MI_SEGMENT_SLICE_SIZE; // 1024
 
@@ -259,12 +262,16 @@ pub const mi_page_t = struct {
 
     local_free: ?*mi_block_t = null, // list of deferred free blocks by this thread (migrates to `free`)
     xthread_free: Atomic(mi_thread_free_t) = Atomic(mi_thread_free_t).init(0), // list of deferred free blocks freed by other threads
-    xheap: Atomic(?*mi_heap_t) = Atomic(?*mi_heap_t).init(null),
+    xheap: Atomic(?*mi_heap_t) = undefined,
     next: ?*mi_page_t = null, // next page owned by this thread with the same `block_size`
     prev: ?*mi_page_t = null, // previous page owned by this thread with the same `block_size`
 
     // 64-bit 9 words, 32-bit 12 words, (+2 for secure)
     padding: if (MI_INTPTR_SIZE == 8) [1]usize else u0 = if (MI_INTPTR_SIZE == 8) .{0} else 0,
+
+    pub fn init() Self {
+        return Self{ .xheap = Atomic(?*mi_heap_t).init(null) };
+    }
 
     pub fn block_size(self: *const Self) usize {
         const bsize = self.xblock_size;
@@ -301,11 +308,11 @@ pub const mi_page_t = struct {
     }
 
     pub fn is_in_full(self: *const Self) bool {
-        self.flags.x.in_full;
+        return self.flags.x.in_full == 1;
     }
 
-    pub fn set_in_full(self: *Self, in_full: bool) bool {
-        self.flags.x.in_full = in_full;
+    pub fn set_in_full(self: *Self, in_full: bool) void {
+        self.flags.x.in_full = if (in_full) 1 else 0;
     }
 
     pub fn has_aligned(self: *const Self) bool {
@@ -337,21 +344,21 @@ pub const mi_segment_kind_t = enum {
 // is still tracked in fine-grained MI_COMMIT_SIZE chunks)
 // ------------------------------------------------------
 
-const MI_MINIMAL_COMMIT_SIZE = 2 * MI_MiB;
-const MI_COMMIT_SIZE = MI_SEGMENT_SLICE_SIZE; // 64KiB
-const MI_COMMIT_MASK_BITS = MI_SEGMENT_SIZE / MI_COMMIT_SIZE;
-const MI_COMMIT_MASK_FIELD_BITS = MI_SIZE_BITS;
-const MI_COMMIT_MASK_FIELD_COUNT = MI_COMMIT_MASK_BITS / MI_COMMIT_MASK_FIELD_BITS;
+pub const MI_MINIMAL_COMMIT_SIZE = 2 * MI_MiB;
+pub const MI_COMMIT_SIZE = MI_SEGMENT_SLICE_SIZE; // 64KiB
+pub const MI_COMMIT_MASK_BITS = MI_SEGMENT_SIZE / MI_COMMIT_SIZE;
+pub const MI_COMMIT_MASK_FIELD_BITS = MI_SIZE_BITS;
+pub const MI_COMMIT_MASK_FIELD_COUNT = MI_COMMIT_MASK_BITS / MI_COMMIT_MASK_FIELD_BITS;
 
 //#if (MI_COMMIT_MASK_BITS != (MI_COMMIT_MASK_FIELD_COUNT * MI_COMMIT_MASK_FIELD_BITS))
 //#error "the segment size must be exactly divisible by the (commit size * size_t bits)"
 //#endif
 
-const mi_commit_mask_t = struct {
+pub const mi_commit_mask_t = struct {
     mask: [MI_COMMIT_MASK_FIELD_COUNT]usize,
 };
 
-const mi_slice_t = mi_page_t;
+pub const mi_slice_t = mi_page_t;
 pub const mi_msecs_t = i64;
 
 // Segments are large allocated memory blocks (8mb on 64 bit) from
@@ -421,12 +428,12 @@ pub const mi_page_queue_t = struct {
         return self.block_size > mi.MEDIUM_OBJ_SIZE_MAX;
     }
 
-    fn contains(self: *const Self, page: *const mi.mi_page_t) bool {
-        if (mi.DEBUG < 1) return true;
+    pub fn contains(self: *const Self, page: *const mi_page_t) bool {
+        if (MI_DEBUG < 1) return true;
         var list = self.first;
-        while (list) |l| : (list = list.next) {
-            mi_assert_internal(l.next == null or l.next.prev == l);
-            mi_assert_internal(l.prev == null or l.prev.next == l);
+        while (list) |l| : (list = l.next) {
+            mi_assert_internal(l.next == null or l.next.?.prev == l);
+            mi_assert_internal(l.prev == null or l.prev.?.next == l);
             if (l == page) return true;
         }
         return false;
@@ -436,22 +443,22 @@ pub const mi_page_queue_t = struct {
 pub const MI_BIN_FULL = MI_BIN_HUGE + 1;
 
 // In debug mode there is a padding structure at the end of the blocks to check for buffer overflows
-const mi_padding_t = if (MI_PADDING > 0) struct {
+pub const mi_padding_t = if (MI_PADDING > 0) struct {
     canary: u32, // encoded block value to check validity of the padding (in case of overflow)
     delta: u32, // padding bytes before the block. (usable_size(p) - delta == exact allocated bytes)
 } else u0;
 
-const MI_PADDING_SIZE = @sizeOf(mi_padding_t);
+pub const MI_PADDING_SIZE = @sizeOf(mi_padding_t);
 const MI_PADDING_WSIZE = (MI_PADDING_SIZE + MI_INTPTR_SIZE - 1) / MI_INTPTR_SIZE;
 
-const MI_PAGES_DIRECT = (MI_SMALL_WSIZE_MAX + MI_PADDING_WSIZE + 1);
+pub const MI_PAGES_DIRECT = (MI_SMALL_WSIZE_MAX + MI_PADDING_WSIZE + 1);
 
 // A heap owns a set of pages.
 pub const mi_heap_t = struct {
     const Self = @This();
 
     tld: ?*mi_tld_t = null,
-    pages_free_direct: [MI_PAGES_DIRECT]?*mi_page_t = [_]?*mi_page_t{null} ** MI_PAGES_DIRECT, // optimize: array where every entry points a page with possibly free blocks in the corresponding queue for that size.
+    pages_free_direct: [MI_PAGES_DIRECT]*mi_page_t = [_]*mi_page_t{&mi._mi_page_empty} ** MI_PAGES_DIRECT, // optimize: array where every entry points a page with possibly free blocks in the corresponding queue for that size.
     pages: [MI_BIN_FULL + 1]mi_page_queue_t = [_]mi_page_queue_t{.{}} ** (MI_BIN_FULL + 1), // queue of pages for each size class (or "bin")
     thread_delayed_free: Atomic(?*mi_block_t) = Atomic(?*mi_block_t).init(null),
     thread_id: mi_threadid_t = 0, // thread this heap belongs too
@@ -477,9 +484,10 @@ pub const mi_heap_t = struct {
         return (self == mi.mi_get_default_heap());
     }
 
-    pub fn contains(self: *const Self, pq: *const mi.page_queue_t) bool {
+    pub fn contains(self: *const Self, pq: *const mi_page_queue_t) bool {
         if (MI_DEBUG < 1) return true;
-        return pq >= self.pages[0] and pq <= &self.pages[mi.MI_BIN_FULL];
+        const pq_addr = @ptrToInt(pq);
+        return pq_addr >= @ptrToInt(&self.pages[0]) and pq_addr <= @ptrToInt(&self.pages[mi.MI_BIN_FULL]);
     }
 };
 
@@ -487,9 +495,9 @@ pub const mi_heap_t = struct {
 // Debug
 // ------------------------------------------------------
 
-const MI_DEBUG_UNINIT = 0xD0;
-const MI_DEBUG_FREED = 0xDF;
-const MI_DEBUG_PADDING = 0xDE;
+pub const MI_DEBUG_UNINIT = 0xD0;
+pub const MI_DEBUG_FREED = 0xDF;
+pub const MI_DEBUG_PADDING = 0xDE;
 
 // ------------------------------------------------------
 // Statistics
@@ -547,7 +555,7 @@ pub const mi_span_queue_t = struct {
     slice_count: usize,
 };
 
-const MI_SEGMENT_BIN_MAX = 35; // 35 == segment_bin(SLICES_PER_SEGMENT)
+pub const MI_SEGMENT_BIN_MAX = 35; // 35 == segment_bin(SLICES_PER_SEGMENT)
 
 // OS thread local data
 pub const mi_os_tld_t = struct {
@@ -616,24 +624,22 @@ inline fn noop(cond: bool) void {
 const mi_assert_internal = if (MI_DEBUG > 1) mi_assert else noop;
 const mi_assert_expensive = if (MI_DEBUG > 2) mi_assert else noop;
 
-const _mi_heap_main = mi._mi_heap_main;
-
 pub inline fn _mi_thread_id() usize {
     return std.Thread.getCurrentId();
 }
 
 // "bit scan reverse": Return index of the highest bit (or MI_INTPTR_BITS if `x` is zero)
-inline fn mi_bsr(x: usize) usize {
-    return if (x == 0) mi.INTPTR_BITS else mi.INTPTR_BITS - 1 - @clz(x);
+pub inline fn mi_bsr(x: usize) usize {
+    return if (x == 0) mi.MI_INTPTR_BITS else mi.MI_INTPTR_BITS - 1 - @clz(x);
 }
 
-inline fn _mi_ptr_cookie(p: *const void) usize {
-    mi_assert_internal(_mi_heap_main.cookie != 0);
-    return (@ptrToInt(p) ^ _mi_heap_main.cookie);
+pub inline fn _mi_ptr_cookie(p: anytype) usize {
+    mi_assert_internal(mi._mi_heap_main.cookie != 0);
+    return (@ptrToInt(p) ^ mi._mi_heap_main.cookie);
 }
 
 // Align upwards
-inline fn _mi_align_up(sz: usize, alignment: usize) usize {
+pub inline fn _mi_align_up(sz: usize, alignment: usize) usize {
     mi_assert_internal(alignment != 0);
     const mask = alignment - 1;
     if ((alignment & mask) == 0) { // power of two?
@@ -644,7 +650,7 @@ inline fn _mi_align_up(sz: usize, alignment: usize) usize {
 }
 
 // Align downwards
-inline fn _mi_align_down(sz: usize, alignment: usize) usize {
+pub inline fn _mi_align_down(sz: usize, alignment: usize) usize {
     mi_assert_internal(alignment != 0);
     const mask = alignment - 1;
     if ((alignment & mask) == 0) { // power of two?
@@ -658,4 +664,202 @@ inline fn _mi_align_down(sz: usize, alignment: usize) usize {
 pub inline fn _mi_divide_up(size: usize, divider: usize) usize {
     mi_assert_internal(divider != 0);
     return if (divider == 0) size else ((size + divider - 1) / divider);
+}
+
+// atomics
+
+pub inline fn mi_atomic_load_relaxed(a: anytype) @TypeOf(a.value) {
+    return a.load(AtomicOrder.Monotonic);
+}
+
+pub const mi_atomic_loadi64_relaxed = mi_atomic_load_relaxed;
+
+pub inline fn mi_atomic_load_acquire(a: anytype) @TypeOf(a.value) {
+    return a.load(AtomicOrder.Acquire);
+}
+
+pub inline fn mi_atomic_store_release(a: anytype, x: @TypeOf(a.value)) void {
+    return a.store(x, AtomicOrder.Release);
+}
+
+pub inline fn mi_atomic_increment_relaxed(a: anytype) void {
+    _ = a.fetchAdd(1, AtomicOrder.Monotonic);
+}
+
+pub inline fn mi_atomic_decrement_relaxed(a: anytype) void {
+    _ = a.fetchSub(1, AtomicOrder.Monotonic);
+}
+
+pub inline fn mi_atomic_add_relaxed(a: anytype, x: @TypeOf(a.value)) void {
+    _ = a.fetchAdd(x, AtomicOrder.Monotonic);
+}
+
+pub inline fn mi_atomic_sub_relaxed(a: anytype, x: @TypeOf(a.value)) void {
+    _ = a.fetchSub(x, AtomicOrder.Monotonic);
+}
+
+pub inline fn mi_atomic_cas_weak_release(a: anytype, exp: *@TypeOf(a.value), des: @TypeOf(a.value)) bool {
+    return a.tryCompareAndSwap(exp.*, des, AtomicOrder.Release, AtomicOrder.Monotonic) != null;
+}
+
+pub inline fn mi_atomic_cas_weak_acq_rel(a: anytype, exp: *@TypeOf(a.value), des: @TypeOf(a.value)) bool {
+    return a.tryCompareAndSwap(exp.*, des, AtomicOrder.AcqRel, AtomicOrder.Acquire) != null;
+}
+
+pub inline fn mi_atomic_cas_strong_acq_rel(a: anytype, exp: *@TypeOf(a.value), des: @TypeOf(a.value)) bool {
+    return a.compareAndSwap(exp.*, des, AtomicOrder.AcqRel, AtomicOrder.Acquire) != null;
+}
+
+pub inline fn mi_atomic_load_ptr_relaxed(comptime T: type, a: *Atomic(?*T)) ?*T {
+    return a.load(AtomicOrder.Monotonic);
+}
+
+pub inline fn mi_atomic_store_ptr_release(comptime T: type, a: *Atomic(?*T), val: ?*T) void {
+    a.store(val, AtomicOrder.Release);
+}
+
+pub inline fn mi_atomic_cas_ptr_weak_acq_rel(comptime T: type, a: *Atomic(?*T), exp: *?*T, des: ?*T) bool {
+    return a.tryCompareAndSwap(exp.*, des, AtomicOrder.AcqRel, AtomicOrder.Acquire) != null;
+}
+
+pub inline fn mi_atomic_exchange_ptr_acq_rel(comptime T: type, a: *Atomic(?*T), val: ?*T) ?*T {
+    return a.swap(val, AtomicOrder.AcqRel);
+}
+
+pub inline fn mi_atomic_cas_ptr_strong_acq_rel(comptime T: type, a: *Atomic(?*T), exp: *?*T, des: ?*T) bool {
+    return a.compareAndSwap(exp.*, des, AtomicOrder.AcqRel, AtomicOrder.Acquire) != null;
+}
+
+pub inline fn mi_atomic_cas_ptr_weak_release(comptime T: type, a: *Atomic(?*T), exp: *?*T, des: ?*T) bool {
+    return a.tryCompareAndSwap(exp.*, des, AtomicOrder.Release, AtomicOrder.Monotonic) != null;
+}
+
+pub inline fn mi_atomic_yield() void {
+    std.Thread.yield() catch return;
+}
+
+// VALGRIND tracking - disabled for now
+pub fn mi_track_malloc(p: anytype, size: usize, zero: bool) void {
+    _ = p;
+    _ = size;
+    _ = zero;
+}
+
+pub fn mi_track_resize(p: anytype, oldsize: usize, newsize: usize) void {
+    _ = p;
+    _ = oldsize;
+    _ = newsize;
+}
+
+pub fn mi_track_mem_free(p: anytype) void {
+    _ = p;
+}
+
+pub fn mi_track_mem_defined(p: anytype, size: usize) void {
+    _ = p;
+    _ = size;
+}
+
+pub fn mi_track_mem_undefined(p: anytype, size: usize) void {
+    _ = p;
+    _ = size;
+}
+
+pub fn mi_track_mem_noaccess(p: anytype, size: usize) void {
+    _ = p;
+    _ = size;
+}
+
+// arena
+
+pub fn _mi_arena_id_none() mi_arena_id_t {
+    return 0;
+}
+
+fn mi_arena_id_is_suitable(arena_id: mi_arena_id_t, arena_is_exclusive: bool, req_arena_id: mi_arena_id_t) bool {
+    return ((!arena_is_exclusive and req_arena_id == _mi_arena_id_none()) or
+        (arena_id == req_arena_id));
+}
+
+pub fn _mi_arena_memid_is_suitable(arena_memid: usize, request_arena_id: mi_arena_id_t) bool {
+    const id = @intCast(mi_arena_id_t, arena_memid & 0x7F);
+    const exclusive = ((arena_memid & 0x80) != 0);
+    return mi_arena_id_is_suitable(id, exclusive, request_arena_id);
+}
+
+// os
+
+// Signal to the OS that the address range is no longer in use
+// but may be used later again. This will release physical memory
+// pages and reduce swapping while keeping the memory committed.
+// We page align to a conservative area inside the range to reset.
+pub fn _mi_os_reset(addr: *anyopaque, size: usize, tld_stats: *mi_stats_t) bool {
+    _ = tld_stats;
+    // mi_stats_t* stats = &_mi_stats_main;
+    // return mi_os_resetx(addr, size, true, stats);
+    std.os.madvise(@alignCast(mem.page_size, @ptrCast([*]u8, addr)), size, std.os.MADV.FREE) catch return false;
+    return true;
+}
+
+pub fn _mi_os_commit(addr: *anyopaque, size: usize, is_zero: *bool, tld_stats: *mi_stats_t) bool {
+    // MI_UNUSED(tld_stats);
+    // mi_stats_t* stats = &_mi_stats_main;
+    // return mi_os_commitx(addr, size, true, false /* liberal */, is_zero, stats);
+    _ = tld_stats;
+    is_zero.* = false; // TODO: What does is_zero mean?
+    std.os.mprotect(@alignCast(mem.page_size, @ptrCast([*]u8, addr))[0..size], os.PROT.READ | os.PROT.WRITE) catch return false;
+    return true;
+}
+
+pub fn _mi_os_decommit(addr: *anyopaque, size: usize, tld_stats: *mi_stats_t) bool {
+    // mi_stats_t* stats = &_mi_stats_main;
+    // bool is_zero;
+    // return mi_os_commitx(addr, size, false, true /* conservative */, &is_zero, stats);
+    return _mi_os_reset(addr, size, tld_stats);
+}
+
+pub fn _mi_os_numa_node(tld: ?*mi_os_tld_t) usize {
+    _ = tld;
+    return 0;
+}
+
+pub fn _mi_os_numa_node_count() usize {
+    return 1;
+}
+
+pub fn _mi_os_page_size() usize {
+    return std.mem.page_size;
+}
+
+// Helper for shifts
+const shift_type = if (@sizeOf(usize) == 8) u6 else u5;
+pub fn mi_shift_cast(shift: usize) shift_type {
+    return @intCast(shift_type, shift);
+}
+
+// -------------------------------------------------------------------
+// Fast "random" shuffle
+// -------------------------------------------------------------------
+
+pub fn _mi_random_shuffle(x_in: usize) usize {
+    var x = x_in;
+    if (x == 0) {
+        x = 17;
+    } // ensure we don't get stuck in generating zeros
+    if (MI_INTPTR_SIZE == 8) {
+        // by Sebastiano Vigna, see: <http://xoshiro.di.unimi.it/splitmix64.c>
+        x ^= x >> 30;
+        x *= 0xbf58476d1ce4e5b9;
+        x ^= x >> 27;
+        x *= 0x94d049bb133111eb;
+        x ^= x >> 31;
+    } else if (MI_INTPTR_SIZE == 4) {
+        // by Chris Wellons, see: <https://nullprogram.com/blog/2018/07/31/>
+        x ^= x >> 16;
+        x *= 0x7feb352d;
+        x ^= x >> 15;
+        x *= 0x846ca68b;
+        x ^= x >> 16;
+    }
+    return x;
 }
