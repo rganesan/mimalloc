@@ -558,7 +558,7 @@ fn _mi_free_block(page: *mi_page_t, local: bool, block: *mi_block_t) void {
 }
 
 // Adjust a block that was allocated aligned, to the actual start of the block in the page.
-pub fn _mi_page_ptr_unalign(segment: *mi_segment_t, page: *const mi_page_t, p: anytype) *mi_block_t {
+pub fn _mi_page_ptr_unalign(segment: *const mi_segment_t, page: *const mi_page_t, p: anytype) *mi_block_t {
     const diff = @ptrToInt(p) - @ptrToInt(_mi_page_start(segment, page, null));
     const adjust = (diff % mi_page_block_size(page));
     return @intToPtr(*mi_block_t, @ptrToInt(p) - adjust);
@@ -566,7 +566,7 @@ pub fn _mi_page_ptr_unalign(segment: *mi_segment_t, page: *const mi_page_t, p: a
 
 fn mi_free_generic(segment: *const mi_segment_t, local: bool, p: *u8) void {
     const page = _mi_segment_page_of(segment, p);
-    const block = if (mi_page_has_aligned(page)) _mi_page_ptr_unalign(segment, page, p) else @ptrCast(*mi_block_t, p);
+    const block = if (mi_page_has_aligned(page)) _mi_page_ptr_unalign(segment, page, p) else @ptrCast(*mi_block_t, @alignCast(@alignOf(mi_block_t), p));
     mi_stat_free(page, block); // stat_free may access the padding
     mi_track_free(p);
     _mi_free_block(page, local, block);
@@ -602,8 +602,7 @@ fn mi_checked_ptr_segment(p: anytype, msg: []const u8) ?*mi_segment_t {
 
 // Free a block
 pub fn mi_free(p: *u8) void {
-    const segment = mi_checked_ptr_segment(p, "mi_free");
-    if (mi_unlikely(segment == null)) return;
+    const segment = mi_checked_ptr_segment(p, "mi_free") orelse return;
 
     const tid = _mi_thread_id();
     const page = _mi_segment_page_of(segment, p);
@@ -611,12 +610,12 @@ pub fn mi_free(p: *u8) void {
     if (mi_likely(tid == mi_atomic_load_relaxed(&segment.thread_id) and page.flags.full_aligned == 0)) {
         // the thread id matches and it is not a full page, nor has aligned blocks
         // local, and not full or aligned
-        const block = @ptrCast(*mi_block_t, p);
+        const block = @ptrCast(*mi_block_t, @alignCast(@alignOf(mi_block_t), p));
         if (mi_unlikely(mi_check_is_double_free(page, block))) return;
         mi_check_padding(page, block);
         mi_stat_free(page, block);
         if (MI_DEBUG != 0 and !MI_TRACK_ENABLED)
-            @memset(block, MI_DEBUG_FREED, mi_page_block_size(page));
+            @memset(@ptrCast([*]u8, block), MI_DEBUG_FREED, mi_page_block_size(page));
         mi_track_free(p);
         mi_block_set_next(page, block, page.local_free);
         page.local_free = block;
@@ -627,7 +626,7 @@ pub fn mi_free(p: *u8) void {
     } else {
         // non-local, aligned blocks, or a full page; use the more generic path
         // note: recalc page in generic to improve code generation
-        mi_free_generic(segment, tid == segment.thread_id, p);
+        mi_free_generic(segment, tid == segment.thread_id.load(AtomicOrder.Monotonic), p);
     }
 }
 

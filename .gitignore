@@ -7,3 +7,11 @@ ide/vs20??/VTune*
 out/
 docs/
 *.zip
+*~
+*.bak
+zig-cache
+zig-out
+TAGS
+build
+*.a
+.gitignore

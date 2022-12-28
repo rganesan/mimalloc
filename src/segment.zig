@@ -66,7 +66,6 @@ const MI_LARGE_OBJ_SIZE_MAX = mi.MI_LARGE_OBJ_SIZE_MAX;
 const MI_MEDIUM_OBJ_SIZE_MAX = mi.MI_MEDIUM_OBJ_SIZE_MAX;
 const MI_SMALL_OBJ_SIZE_MAX = mi.MI_SMALL_OBJ_SIZE_MAX;
 
-const MI_SEGMENT_NORMAL = mi.MI_SEGMENT_NORMAL;
 const MI_SEGMENT_MASK = mi.MI_SEGMENT_MASK;
 const MI_SEGMENT_SIZE = mi.MI_SEGMENT_SIZE;
 const MI_SEGMENT_SLICE_SIZE = mi.MI_SEGMENT_SLICE_SIZE;
@@ -102,7 +101,7 @@ const _mi_page_use_delayed_free = mi._mi_page_use_delayed_free;
 const mi_block_set_next = mi.mi_block_set_next;
 
 const _mi_arena_free = mi._mi_arena_free;
-const mi_arena_alloc_aligned = mi.mi_arena_alloc_aligned;
+const _mi_arena_alloc_aligned = mi._mi_arena_alloc_aligned;
 const _mi_arena_memid_is_suitable = mi._mi_arena_memid_is_suitable;
 
 const _mi_current_thread_count = mi._mi_current_thread_count;
@@ -147,7 +146,7 @@ const mi_heap_get_default = mi.mi_heap_get_default;
 
 const _mi_segment_cache_push = mi._mi_segment_cache_push;
 const _mi_segment_cache_pop = mi._mi_segment_cache_pop;
-const _mi_segment_map_allocated_at = _mi_segment_map_allocated_at;
+const _mi_segment_map_allocated_at = mi._mi_segment_map_allocated_at;
 
 const mi_track_mem_undefined = mi.mi_track_mem_undefined;
 
@@ -209,7 +208,7 @@ pub inline fn _mi_ptr_page(p: *const anyopaque) *mi_page_t {
 }
 
 // Quick page start for initialized pages
-pub inline fn _mi_page_start(segment: *mi_segment_t, page: *const mi_page_t, page_size: ?*usize) [*]u8 {
+pub inline fn _mi_page_start(segment: *const mi_segment_t, page: *const mi_page_t, page_size: ?*usize) [*]u8 {
     return _mi_segment_page_start(segment, page, page_size);
 }
 
@@ -222,7 +221,7 @@ pub inline fn mi_page_thread_free_flag(page: *const mi_page_t) mi_delayed_t {
     return @intToEnum(mi_delayed_t, mi_atomic_load_relaxed(page.xthread_free) & @intCast(usize, 3));
 }
 
-inline fn mi_slice_first(slice: *mi_slice_t) *mi_slice_t {
+inline fn mi_slice_first(slice: *const mi_slice_t) *mi_slice_t {
     const start = @intToPtr([*]mi_slice_t, @ptrToInt(slice) - slice.slice_offset);
     mi_assert_internal(@ptrToInt(start) >= @ptrToInt(&_mi_ptr_segment(@ptrCast(*const u8, slice)).slices));
     mi_assert_internal(start[0].slice_offset == 0);
@@ -230,7 +229,7 @@ inline fn mi_slice_first(slice: *mi_slice_t) *mi_slice_t {
     return &start[0];
 }
 
-pub inline fn _mi_segment_page_of(segment: *mi_segment_t, p: anytype) *mi_page_t {
+pub inline fn _mi_segment_page_of(segment: *const mi_segment_t, p: anytype) *mi_page_t {
     const diff = @ptrToInt(p) - @ptrToInt(segment);
     mi_assert_internal(diff >= 0 and diff < MI_SEGMENT_SIZE);
     const idx = diff >> MI_SEGMENT_SLICE_SHIFT;
@@ -246,7 +245,7 @@ pub inline fn _mi_segment_page_of(segment: *mi_segment_t, p: anytype) *mi_page_t
 // commit mask
 // -------------------------------------------------------------------
 
-fn mi_commit_mask_create_empty(cm: *mi_commit_mask_t) void {
+pub fn mi_commit_mask_create_empty(cm: *mi_commit_mask_t) void {
     var i: usize = 0;
     while (i < MI_COMMIT_MASK_FIELD_COUNT) : (i += 1) {
         cm.mask[i] = 0;
@@ -260,7 +259,7 @@ fn mi_commit_mask_create_full(cm: *mi_commit_mask_t) void {
     }
 }
 
-fn mi_commit_mask_is_empty(cm: *const mi_commit_mask_t) bool {
+pub fn mi_commit_mask_is_empty(cm: *const mi_commit_mask_t) bool {
     var i: usize = 0;
     while (i < MI_COMMIT_MASK_FIELD_COUNT) : (i += 1) {
         if (cm.mask[i] != 0) return false;
@@ -268,7 +267,7 @@ fn mi_commit_mask_is_empty(cm: *const mi_commit_mask_t) bool {
     return true;
 }
 
-fn mi_commit_mask_is_full(cm: *const mi_commit_mask_t) bool {
+pub fn mi_commit_mask_is_full(cm: *const mi_commit_mask_t) bool {
     var i: usize = 0;
     while (i < MI_COMMIT_MASK_FIELD_COUNT) : (i += 1) {
         if (cm.mask[i] != ~@intCast(usize, 0)) return false;
@@ -414,7 +413,7 @@ pub fn _mi_commit_mask_next_run(cm: *const mi_commit_mask_t, idx: *usize) usize 
 //-----------------------------------------------------------
 
 fn mi_segment_slices_end(segment: *const mi_segment_t) *const mi_slice_t {
-    return &segment.slices[segment.slice_entries];
+    return @ptrCast(*const mi_slice_t, @ptrCast([*]const mi_slice_t, &segment.slices) + segment.slice_entries);
 }
 
 fn mi_slice_start(slice: *const mi_slice_t) [*]u8 {
@@ -565,7 +564,7 @@ fn mi_segment_info_size(segment: *mi_segment_t) usize {
     return segment.segment_info_slices * MI_SEGMENT_SLICE_SIZE;
 }
 
-fn _mi_segment_page_start_from_slice(segment: *mi_segment_t, slice: *const mi_slice_t, xblock_size: usize, page_size: ?*usize) [*]u8 {
+fn _mi_segment_page_start_from_slice(segment: *const mi_segment_t, slice: *const mi_slice_t, xblock_size: usize, page_size: ?*usize) [*]u8 {
     const idx = @ptrToInt(slice) - @ptrToInt(&segment.slices);
     const psize = slice.slice_count * MI_SEGMENT_SLICE_SIZE;
     // make the start not OS page aligned for smaller blocks to avoid page/cache effects
@@ -573,11 +572,12 @@ fn _mi_segment_page_start_from_slice(segment: *mi_segment_t, slice: *const mi_sl
     if (page_size != null) {
         page_size.?.* = psize - start_offset;
     }
-    return @ptrCast([*]u8, segment) + ((idx * MI_SEGMENT_SLICE_SIZE) + start_offset);
+    // TODO: casting away const :-(
+    return @intToPtr([*]u8, @ptrToInt(segment)) + ((idx * MI_SEGMENT_SLICE_SIZE) + start_offset);
 }
 
 // Start of the page available memory; can be used on uninitialized pages
-pub fn _mi_segment_page_start(segment: *mi_segment_t, page: *const mi_page_t, page_size: ?*usize) [*]u8 {
+pub fn _mi_segment_page_start(segment: *const mi_segment_t, page: *const mi_page_t, page_size: ?*usize) [*]u8 {
     const slice = mi_page_to_slice(@intToPtr(*mi_page_t, @ptrToInt(page))); // TODO: casting away const
     const p = _mi_segment_page_start_from_slice(segment, slice, page.xblock_size, page_size);
     mi_assert_internal(page.xblock_size > 0 or _mi_ptr_page(p) == page);
@@ -615,7 +615,7 @@ fn mi_segments_track_size(segment_size: isize, tld: *mi_segments_tld_t) void {
     if (segment_size >= 0) _mi_stat_increase(&tld.stats.?.segments, 1) else _mi_stat_decrease(&tld.stats.?.segments, 1);
     if (segment_size >= 0) tld.count += 1 else tld.count -= 1;
     if (tld.count > tld.peak_count) tld.peak_count = tld.count;
-    if (segment_size < 0) tld.current_size += @intCast(usize, segment_size) else tld.current_size -= @intCast(usize, -segment_size);
+    if (segment_size < 0) tld.current_size -= @intCast(usize, -segment_size) else tld.current_size += @intCast(usize, segment_size);
     // tld.current_size += segment_size;
     if (tld.current_size > tld.peak_size) tld.peak_size = tld.current_size;
 }
@@ -644,7 +644,7 @@ fn mi_segment_os_free(segment: *mi_segment_t, tld: *mi_segments_tld_t) void {
             _mi_stat_decrease(&mi._mi_stats_main.committed, csize);
         _mi_abandoned_await_readers(); // wait until safe to free
         // pretend not committed to not double count decommits
-        _mi_arena_free(segment, mi_segment_size(segment), segment.memid, segment.mem_is_pinned, tld.os);
+        _mi_arena_free(segment, mi_segment_size(segment), segment.memid, segment.mem_is_pinned, tld.os.?);
     }
 }
 
@@ -1007,9 +1007,8 @@ fn mi_segments_page_find_and_allocate(slice_count_in: usize, req_arena_id: mi_ar
 
 // Allocate a segment from the OS aligned to `MI_SEGMENT_SIZE` .
 fn mi_segment_init(segment_in: ?*mi_segment_t, required: usize, req_arena_id: mi_arena_id_t, tld: *mi_segments_tld_t, os_tld: *mi_os_tld_t, huge_page: ?*?*mi_page_t) ?*mi_segment_t {
-    var segment = segment_in;
     mi_assert_internal((required == 0 and huge_page == null) or (required > 0 and huge_page != null));
-    mi_assert_internal((segment == null) or (segment != null and required == 0));
+    mi_assert_internal((segment_in == null) or (segment_in != null and required == 0));
     // calculate needed sizes first
     var info_slices: usize = undefined;
     var pre_size: usize = undefined;
@@ -1022,36 +1021,37 @@ fn mi_segment_init(segment_in: ?*mi_segment_t, required: usize, req_arena_id: mi
         _mi_current_thread_count() > 1 and // do not delay for the first N threads
         tld.count < mi_option_get(.mi_option_eager_commit_delay));
     const eager = !eager_delay and mi_option_is_enabled(.mi_option_eager_commit);
-    const commit = eager or (required > 0);
+    var commit = eager or (required > 0);
 
     // Try to get from our cache first
     var is_zero = false;
-    const commit_info_still_good = (segment != null);
+    const commit_info_still_good = (segment_in != null);
     var commit_mask: mi_commit_mask_t = undefined;
     var decommit_mask: mi_commit_mask_t = undefined;
-    if (segment != null) {
-        commit_mask = segment.?.commit_mask;
-        decommit_mask = segment.?.decommit_mask;
+    if (segment_in) |segment| {
+        commit_mask = segment.commit_mask;
+        decommit_mask = segment.decommit_mask;
     } else {
         mi_commit_mask_create_empty(&commit_mask);
         mi_commit_mask_create_empty(&decommit_mask);
     }
-    if (segment == null) {
+    var segment: *mi_segment_t = undefined;
+    if (segment_in == null) {
         // Allocate the segment from the OS
         var mem_large = (!eager_delay and (MI_SECURE == 0)); // only allow large OS pages once we are no longer lazy
         var is_pinned = false;
         var memid: usize = 0;
-        segment = _mi_segment_cache_pop(segment_size, &commit_mask, &decommit_mask, &mem_large, &is_pinned, &is_zero, req_arena_id, &memid, os_tld);
-        if (segment == null) {
-            segment = mi_arena_alloc_aligned(segment_size, MI_SEGMENT_SIZE, &commit, &mem_large, &is_pinned, &is_zero, req_arena_id, &memid, os_tld);
-            if (segment == null) return null; // failed to allocate
+        const segment_pop = _mi_segment_cache_pop(segment_size, &commit_mask, &decommit_mask, &mem_large, &is_pinned, &is_zero, req_arena_id, &memid, os_tld);
+        if (segment_pop == null) {
+            const ptr = _mi_arena_alloc_aligned(segment_size, MI_SEGMENT_SIZE, &commit, &mem_large, &is_pinned, &is_zero, req_arena_id, &memid, os_tld) orelse return null;
+            segment = @ptrCast(*mi_segment_t, @alignCast(@alignOf(mi_segment_t), ptr));
             if (commit) {
                 mi_commit_mask_create_full(&commit_mask);
             } else {
                 mi_commit_mask_create_empty(&commit_mask);
             }
-        }
-        mi_assert_internal(segment != null and @ptrToInt(segment) % MI_SEGMENT_SIZE == 0);
+        } else segment = segment_pop.?;
+        mi_assert_internal(@ptrToInt(segment) % MI_SEGMENT_SIZE == 0);
 
         const commit_needed = _mi_divide_up(info_slices * MI_SEGMENT_SLICE_SIZE, MI_COMMIT_SIZE);
         mi_assert_internal(commit_needed > 0);
@@ -1060,7 +1060,7 @@ fn mi_segment_init(segment_in: ?*mi_segment_t, required: usize, req_arena_id: mi
         if (!mi_commit_mask_all_set(&commit_mask, &commit_needed_mask)) {
             // at least commit the info slices
             mi_assert_internal(commit_needed * MI_COMMIT_SIZE >= info_slices * MI_SEGMENT_SLICE_SIZE);
-            const ok = _mi_os_commit(segment, commit_needed * MI_COMMIT_SIZE, &is_zero, tld.stats);
+            const ok = _mi_os_commit(segment, commit_needed * MI_COMMIT_SIZE, &is_zero, tld.stats.?);
             if (!ok) return null; // failed to commit
             mi_commit_mask_set(&commit_mask, &commit_needed_mask);
         }
@@ -1069,7 +1069,7 @@ fn mi_segment_init(segment_in: ?*mi_segment_t, required: usize, req_arena_id: mi
         segment.mem_is_pinned = is_pinned;
         segment.mem_is_large = mem_large;
         segment.mem_is_committed = mi_commit_mask_is_full(&commit_mask);
-        mi_segments_track_size(segment_size, tld);
+        mi_segments_track_size(@intCast(isize, segment_size), tld);
         _mi_segment_map_allocated_at(segment);
     }
 
@@ -1078,7 +1078,7 @@ fn mi_segment_init(segment_in: ?*mi_segment_t, required: usize, req_arena_id: mi
     if (!is_zero) {
         const ofs = @offsetOf(mi_segment_t, "next");
         const prefix = @offsetOf(mi_segment_t, "slices") - ofs;
-        @memset(@ptrCast(*u8, segment) + ofs, 0, prefix + @sizeOf(mi_slice_t) * segment_slices);
+        @memset(@ptrCast([*]u8, segment) + ofs, 0, prefix + @sizeOf(mi_slice_t) * segment_slices);
     }
 
     if (!commit_info_still_good) {
@@ -1105,13 +1105,13 @@ fn mi_segment_init(segment_in: ?*mi_segment_t, required: usize, req_arena_id: mi
     // initialize segment info
     segment.segment_slices = segment_slices;
     segment.segment_info_slices = info_slices;
-    segment.thread_id = _mi_thread_id();
+    segment.thread_id.store(_mi_thread_id(), AtomicOrder.Unordered);
     segment.cookie = _mi_ptr_cookie(segment);
     segment.slice_entries = slice_entries;
     segment.kind = if (required == 0) .MI_SEGMENT_NORMAL else .MI_SEGMENT_HUGE;
 
     // memset(segment.slices, 0, sizeof(mi_slice_t)*(info_slices+1));
-    _mi_stat_increase(&tld.stats.page_committed, mi_segment_info_size(segment));
+    _mi_stat_increase(&tld.stats.?.page_committed, mi_segment_info_size(segment));
 
     // set up guard pages
     var guard_slices: usize = 0;
@@ -1136,7 +1136,7 @@ fn mi_segment_init(segment_in: ?*mi_segment_t, required: usize, req_arena_id: mi
     segment.used = 0; // don't count our internal slices towards usage
 
     // initialize initial free pages
-    if (segment.kind == MI_SEGMENT_NORMAL) { // not a huge page
+    if (segment.kind == .MI_SEGMENT_NORMAL) { // not a huge page
         mi_assert_internal(huge_page == null);
         mi_segment_span_free(segment, info_slices, segment.slice_entries - info_slices, tld);
     } else {
@@ -1270,7 +1270,7 @@ const MI_TAGGED_MASK = MI_SEGMENT_MASK;
 const mi_tagged_segment_t = usize;
 
 fn mi_tagged_segment_ptr(ts: mi_tagged_segment_t) ?*mi_segment_t {
-    return @intToPtr(*mi_segment_t, ts & ~MI_TAGGED_MASK);
+    return @intToPtr(?*mi_segment_t, ts & ~MI_TAGGED_MASK);
 }
 
 fn mi_tagged_segment(segment: *mi_segment_t, ts: mi_tagged_segment_t) mi_tagged_segment_t {
@@ -1370,7 +1370,7 @@ fn mi_abandoned_push(segment: *mi_segment_t) void {
 
 // Wait until there are no more pending reads on segments that used to be in the abandoned list
 // called for example from `arena.c` before decommitting
-fn _mi_abandoned_await_readers() void {
+pub fn _mi_abandoned_await_readers() void {
     var n = mi_atomic_load_acquire(&abandoned_readers);
     while (n != 0) : (n = mi_atomic_load_acquire(&abandoned_readers)) {
         mi_atomic_yield();

@@ -212,7 +212,7 @@ pub inline fn mi_block_next(page: *const mi_page_t, block: *const mi_block_t) ?*
         // check for free list corruption: is `next` at least in the same page?
         // TODO: check if `next` is `page->block_size` aligned?
         if (mi_unlikely(next != null and !mi_is_in_same_page(block, next.?))) {
-            std.log.err("corrupted free list entry of size {}b at 0x{:x} value 0x{:x}\n", .{ mi_page_block_size(page), block, next });
+            std.log.err("corrupted free list entry of size {}b at {} value {?}\n", .{ mi_page_block_size(page), block, next });
             next = null;
         }
         return next;

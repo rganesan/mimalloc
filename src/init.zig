@@ -154,7 +154,8 @@ const mi_tld_empty = mi_tld_t{
 var mi_tld_main = mi_tld_t{
     .heap_backing = &_mi_heap_main,
     .heaps = &_mi_heap_main,
-    //    .segments = .{ .spans = MI_SEGMENT_SPAN_QUEUES_EMPTY, .stats = &mi_tld_main.stats, .os = &mi_tld_main.os }
+    // .stats and .os initialization moved to mi_heap_main_init() because zig says dependency loop
+    // .segments = .{ .spans = MI_SEGMENT_SPAN_QUEUES_EMPTY, .stats = &mi_tld_main.stats, .os = &mi_tld_main.os },
     .segments = .{ .spans = MI_SEGMENT_SPAN_QUEUES_EMPTY },
     // .os = .{ .stats = &mi_tld_main.stats }, // os
 };
@@ -170,6 +171,11 @@ pub var _mi_stats_main = mi_stats_t{};
 
 fn mi_heap_main_init() void {
     if (_mi_heap_main.cookie == 0) {
+        // Couldn't initialize these three before (zig complains about dependency loop)
+        mi_tld_main.segments.stats = &mi_tld_main.stats;
+        mi_tld_main.segments.os = &mi_tld_main.os;
+        mi_tld_main.os.stats = &mi_tld_main.stats;
+
         _mi_heap_main.tld = &mi_tld_main;
         _mi_heap_main.thread_id = _mi_thread_id();
         var rng = Prng.init(crandom.int(u64));
@@ -481,6 +487,6 @@ pub fn mi_process_done() void {
     if (mi_option_is_enabled(mi_option_show_stats) || mi_option_is_enabled(mi_option_verbose)) {
         mi_stats_print(null);
     }
-    std.log.debug("process done: 0x{:x}", .{_mi_heap_main.thread_id});
+    std.log.debug("process done: {}", .{_mi_heap_main.thread_id});
     os_preloading = true; // don't call the C runtime anymore
 }

@@ -21,6 +21,7 @@ const mi = struct {
     usingnamespace @import("types.zig");
     usingnamespace @import("segment.zig");
     usingnamespace @import("stats.zig");
+    usingnamespace @import("bitmap.zig");
 };
 
 const MI_DEBUG = mi.MI_DEBUG;
@@ -46,7 +47,6 @@ const _mi_arena_memid_is_suitable = mi._mi_arena_memid_is_suitable;
 const _mi_ptr_segment = mi._mi_ptr_segment;
 
 const mi_option_is_enabled = mi.mi_option_is_enabled;
-const mi_option_segment_decommit_delay = mi.mi_option_segment_decommit_delay;
 const mi_option_get = mi.mi_option_get;
 
 const _mi_ptr_cookie = mi._mi_ptr_cookie;
@@ -97,8 +97,13 @@ inline fn mi_unlikely(cond: bool) bool {
     return cond;
 }
 
-const MI_BITMAP_FIELD_BITS = (8 * MI_SIZE_SIZE);
-const MI_BITMAP_FIELD_FULL = ~@intCast(usize, 0); // all bits set
+// bitmap.zig
+const MI_BITMAP_FIELD_BITS = mi.MI_BITMAP_FIELD_BITS;
+const MI_BITMAP_FIELD_FULL = mi.MI_BITMAP_FIELD_FULL;
+const mi_bitmap_index_t = mi.mi_bitmap_index_t;
+const mi_bitmap_field_t = mi.mi_bitmap_field_t;
+const mi_bitmap_t = mi.mi_bitmap_t;
+const mi_bitmap_index_bit = mi.mi_bitmap_index_bit;
 
 const MI_CACHE_DISABLE = false; // define to completely disable the segment cache
 const MI_CACHE_FIELDS = 16;
@@ -106,7 +111,6 @@ const MI_CACHE_FIELDS = 16;
 const MI_CACHE_MAX = (MI_BITMAP_FIELD_BITS * MI_CACHE_FIELDS); // 1024 on 64-bit
 
 // A bitmap index is the index of the bit in a bitmap.
-const mi_bitmap_index_t = usize;
 
 // #define BITS_SET()          MI_ATOMIC_VAR_INIT(UINTPTR_MAX)
 // #define MI_CACHE_BITS_SET   MI_INIT16(BITS_SET)                          // note: update if MI_CACHE_FIELDS changes
@@ -121,20 +125,13 @@ const mi_cache_slot_t = struct {
 };
 
 var cache = std.mem.zeroes([MI_CACHE_MAX]mi_cache_slot_t);
-const mi_bitmap_field_t = Atomic(usize);
-const mi_bitmap_t = *mi_bitmap_field_t;
 
 // initialize to all ones; zero bit = available!
-var cache_available = [1]Atomic(usize).init(std.math.maxInt(usize)) ** MI_CACHE_FIELDS;
-var cache_available_large = cache_available;
-var cache_inuse = cache_available; // zero bit = free
+var cache_available = [1]Atomic(usize){Atomic(usize).init(std.math.maxInt(usize))} ** MI_CACHE_FIELDS;
+var cache_available_large = [1]Atomic(usize){Atomic(usize).init(std.math.maxInt(usize))} ** MI_CACHE_FIELDS; // zero bit = free
+var cache_inuse = [1]Atomic(usize){Atomic(usize).init(std.math.maxInt(usize))} ** MI_CACHE_FIELDS;
 
-// Get the full bit index
-inline fn mi_bitmap_index_bit(bitmap_idx: mi_bitmap_index_t) usize {
-    return bitmap_idx;
-}
-
-fn mi_segment_cache_is_suitable(bitidx: mi_bitmap_index_t, arg: *anyopaque) bool {
+fn mi_segment_cache_is_suitable(bitidx: mi_bitmap_index_t, arg: mi.PredArg) bool {
     const req_arena_id = @ptrCast(*mi_arena_id_t, @alignCast(@alignOf(mi_arena_id_t), arg)).*;
     const slot = &cache[mi_bitmap_index_bit(bitidx)];
     return _mi_arena_memid_is_suitable(slot.memid, req_arena_id);
@@ -159,13 +156,14 @@ pub fn _mi_segment_cache_pop(size: usize, commit_mask: *mi_commit_mask_t, decomm
     var claimed = false;
     var req_arena_id = _req_arena_id;
     const pred_fun = mi_segment_cache_is_suitable; // cannot pass null as the arena may be exclusive itself; todo: do not put exclusive arenas in the cache?
+    const pred_arg = @ptrCast(mi.PredArg, &req_arena_id);
 
     if (large.*) { // large allowed?
-        claimed = _mi_bitmap_try_find_from_claim_pred(cache_available_large, MI_CACHE_FIELDS, start_field, 1, pred_fun, &req_arena_id, &bitidx);
+        claimed = _mi_bitmap_try_find_from_claim_pred(&cache_available_large, MI_CACHE_FIELDS, start_field, 1, pred_fun, pred_arg, &bitidx);
         if (claimed) large.* = true;
     }
     if (!claimed) {
-        claimed = _mi_bitmap_try_find_from_claim_pred(cache_available, MI_CACHE_FIELDS, start_field, 1, pred_fun, &req_arena_id, &bitidx);
+        claimed = _mi_bitmap_try_find_from_claim_pred(&cache_available, MI_CACHE_FIELDS, start_field, 1, pred_fun, pred_arg, &bitidx);
         if (claimed) large.* = false;
     }
 
@@ -183,16 +181,16 @@ pub fn _mi_segment_cache_pop(size: usize, commit_mask: *mi_commit_mask_t, decomm
     mi_atomic_storei64_release(&slot.expire, @intCast(mi_msecs_t, 0));
 
     // mark the slot as free again
-    mi_assert_internal(_mi_bitmap_is_claimed(cache_inuse, MI_CACHE_FIELDS, 1, bitidx));
-    _mi_bitmap_unclaim(cache_inuse, MI_CACHE_FIELDS, 1, bitidx);
-    return p;
+    mi_assert_internal(_mi_bitmap_is_claimed(&cache_inuse, MI_CACHE_FIELDS, 1, bitidx));
+    _ = _mi_bitmap_unclaim(&cache_inuse, MI_CACHE_FIELDS, 1, bitidx);
+    return @ptrCast(*mi_segment_t, @alignCast(@alignOf(mi_segment_t), p));
 }
 
-fn mi_commit_mask_decommit(cmask: *mi_commit_mask_t, p: *void, total: usize, stats: *mi_stats_t) void {
+fn mi_commit_mask_decommit(cmask: *mi_commit_mask_t, p: *anyopaque, total: usize, stats: *mi_stats_t) void {
     if (mi_commit_mask_is_empty(cmask)) {
         // nothing
     } else if (mi_commit_mask_is_full(cmask)) {
-        _mi_os_decommit(p, total, stats);
+        _ = _mi_os_decommit(p, total, stats);
     } else {
         // todo: one call to decommit the whole at once?
         mi_assert_internal((total % MI_COMMIT_MASK_BITS) == 0);
@@ -200,9 +198,9 @@ fn mi_commit_mask_decommit(cmask: *mi_commit_mask_t, p: *void, total: usize, sta
         var idx: usize = 0;
         var count = _mi_commit_mask_next_run(cmask, &idx);
         while (count > 0) : (count = _mi_commit_mask_next_run(cmask, &idx)) {
-            const start = @ptrCast(*u8, p) + (idx * part);
+            const start = @ptrCast([*]u8, p) + (idx * part);
             const size = count * part;
-            _mi_os_decommit(start, size, stats);
+            _ = _mi_os_decommit(start, size, stats);
             idx += count;
         }
     }
@@ -230,20 +228,20 @@ fn mi_segment_cache_purge(force: bool, tld: *mi_os_tld_t) void {
             // seems expired, first claim it from available
             purged += 1;
             const bitidx = mi_bitmap_index_create_from_bit(idx);
-            if (_mi_bitmap_claim(cache_available, MI_CACHE_FIELDS, 1, bitidx, null)) {
+            if (_mi_bitmap_claim(&cache_available, MI_CACHE_FIELDS, 1, bitidx, null)) {
                 // was available, we claimed it
                 expire = mi_atomic_loadi64_acquire(&slot.expire);
                 if (expire != 0 and (force or now >= expire)) { // safe read
                     // still expired, decommit it
                     mi_atomic_storei64_relaxed(&slot.expire, 0);
-                    mi_assert_internal(!mi_commit_mask_is_empty(&slot.commit_mask) and _mi_bitmap_is_claimed(cache_available_large, MI_CACHE_FIELDS, 1, bitidx));
+                    mi_assert_internal(!mi_commit_mask_is_empty(&slot.commit_mask) and _mi_bitmap_is_claimed(&cache_available_large, MI_CACHE_FIELDS, 1, bitidx));
                     _mi_abandoned_await_readers(); // wait until safe to decommit
                     // decommit committed parts
                     // TODO: instead of decommit, we could also free to the OS?
-                    mi_commit_mask_decommit(&slot.commit_mask, slot.p, MI_SEGMENT_SIZE, tld.stats);
+                    mi_commit_mask_decommit(&slot.commit_mask, slot.p.?, MI_SEGMENT_SIZE, tld.stats.?);
                     mi_commit_mask_create_empty(&slot.decommit_mask);
                 }
-                _mi_bitmap_unclaim(cache_available, MI_CACHE_FIELDS, 1, bitidx); // make it available again for a pop
+                _ = _mi_bitmap_unclaim(&cache_available, MI_CACHE_FIELDS, 1, bitidx); // make it available again for a pop
             }
             if (!force and purged > MI_MAX_PURGE_PER_PUSH) break; // bound to no more than N purge tries per push
             idx += 1;
@@ -275,11 +273,11 @@ pub fn _mi_segment_cache_push(start: *mi_segment_t, size: usize, memid: usize, c
 
     // find an available slot
     var bitidx: mi_bitmap_index_t = undefined;
-    var claimed = _mi_bitmap_try_find_from_claim(cache_inuse, MI_CACHE_FIELDS, start_field, 1, &bitidx);
+    var claimed = _mi_bitmap_try_find_from_claim(&cache_inuse, MI_CACHE_FIELDS, start_field, 1, &bitidx);
     if (!claimed) return false;
 
-    mi_assert_internal(_mi_bitmap_is_claimed(cache_available, MI_CACHE_FIELDS, 1, bitidx));
-    mi_assert_internal(_mi_bitmap_is_claimed(cache_available_large, MI_CACHE_FIELDS, 1, bitidx));
+    mi_assert_internal(_mi_bitmap_is_claimed(&cache_available, MI_CACHE_FIELDS, 1, bitidx));
+    mi_assert_internal(_mi_bitmap_is_claimed(&cache_available_large, MI_CACHE_FIELDS, 1, bitidx));
     if (MI_DEBUG > 1 and (is_pinned or is_large)) {
         mi_assert_internal(mi_commit_mask_is_full(commit_mask));
     }
@@ -293,10 +291,10 @@ pub fn _mi_segment_cache_push(start: *mi_segment_t, size: usize, memid: usize, c
     slot.commit_mask = commit_mask.*;
     slot.decommit_mask = decommit_mask.*;
     if (!mi_commit_mask_is_empty(commit_mask) and !is_large and !is_pinned and mi_option_is_enabled(.mi_option_allow_decommit)) {
-        const delay = mi_option_get(mi_option_segment_decommit_delay);
+        const delay = mi_option_get(.mi_option_segment_decommit_delay);
         if (delay == 0) {
             _mi_abandoned_await_readers(); // wait until safe to decommit
-            mi_commit_mask_decommit(&slot.commit_mask, start, MI_SEGMENT_SIZE, tld.stats);
+            mi_commit_mask_decommit(&slot.commit_mask, start, MI_SEGMENT_SIZE, tld.stats.?);
             mi_commit_mask_create_empty(&slot.decommit_mask);
         } else {
             mi_atomic_storei64_release(&slot.expire, _mi_clock_now() + delay);
@@ -304,7 +302,7 @@ pub fn _mi_segment_cache_push(start: *mi_segment_t, size: usize, memid: usize, c
     }
 
     // make it available
-    _mi_bitmap_unclaim(if (is_large) cache_available_large else cache_available, MI_CACHE_FIELDS, 1, bitidx);
+    _ = _mi_bitmap_unclaim(if (is_large) &cache_available_large else &cache_available, MI_CACHE_FIELDS, 1, bitidx);
     return true;
 }
 
@@ -339,14 +337,14 @@ fn mi_segment_map_index_of(segment: *const mi_segment_t, bitidx: *usize) usize {
     }
 }
 
-fn _mi_segment_map_allocated_at(segment: *const mi_segment_t) void {
+pub fn _mi_segment_map_allocated_at(segment: *const mi_segment_t) void {
     var bitidx: usize = undefined;
     const index = mi_segment_map_index_of(segment, &bitidx);
     mi_assert_internal(index <= MI_SEGMENT_MAP_WSIZE);
     if (index == MI_SEGMENT_MAP_WSIZE) return;
-    const mask = mi_atomic_load_relaxed(&mi_segment_map[index]);
+    var mask = mi_atomic_load_relaxed(&mi_segment_map[index]);
     while (true) {
-        const newmask = (mask | @intCast(usize, 1) << bitidx);
+        const newmask = (mask | @intCast(usize, 1) << mi.mi_shift_cast(bitidx));
         if (mi_atomic_cas_weak_release(&mi_segment_map[index], &mask, newmask)) break;
     }
 }
