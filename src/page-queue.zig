@@ -17,6 +17,7 @@ const mi = struct {
     usingnamespace @import("types.zig");
     usingnamespace @import("init.zig");
     usingnamespace @import("page.zig");
+    usingnamespace @import("page-queue.zig");
     usingnamespace @import("segment.zig");
 };
 
@@ -26,6 +27,7 @@ const MI_BIN_FULL = mi.MI_BIN_FULL;
 const MI_BIN_HUGE = mi.MI_BIN_HUGE;
 
 const MI_MEDIUM_OBJ_SIZE_MAX = mi.MI_MEDIUM_OBJ_SIZE_MAX;
+const MI_MEDIUM_OBJ_WSIZE_MAX = mi.MI_MEDIUM_OBJ_WSIZE_MAX;
 const MI_LARGE_OBJ_SIZE_MAX = mi.MI_LARGE_OBJ_SIZE_MAX;
 const MI_SMALL_SIZE_MAX = mi.MI_SMALL_SIZE_MAX;
 
@@ -93,8 +95,8 @@ pub inline fn mi_bin(size: usize) u8 {
         bin = @intCast(u8, wsize + 1) & ~@intCast(u8, 1); // round to double word sizes
     } else if (wsize <= 8) {
         bin = @intCast(u8, wsize);
-    } else if (wsize > mi.MI_MEDIUM_OBJ_WSIZE_MAX) {
-        bin = mi.MI_BIN_HUGE;
+    } else if (wsize > MI_MEDIUM_OBJ_WSIZE_MAX) {
+        bin = MI_BIN_HUGE;
     } else {
         if (MI_ALIGN4W and wsize <= 16)
             wsize = (wsize + 3) & ~@intCast(usize, 3); // round to 4x word sizes
@@ -105,16 +107,16 @@ pub inline fn mi_bin(size: usize) u8 {
         // - adjust with 3 because we use do not round the first 8 sizes
         //   which each get an exact bin
         bin = ((b << 2) + @intCast(u8, (wsize >> @intCast(u5, b - 2)) & 0x03)) - 3;
-        assert(bin < mi.MI_BIN_HUGE);
+        assert(bin < MI_BIN_HUGE);
     }
-    assert(bin > 0 and bin <= mi.MI_BIN_HUGE);
+    assert(bin > 0 and bin <= MI_BIN_HUGE);
     return bin;
 }
 
 test "bins" {
     const expect = std.testing.expect;
     var i: usize = 1;
-    std.debug.print("mi.MEDIUM_OBJ_WSIZE_MAX: {}\n", .{mi.MEDIUM_OBJ_WSIZE_MAX});
+    std.debug.print("mi.MEDIUM_OBJ_WSIZE_MAX: {}\n", .{MI_MEDIUM_OBJ_WSIZE_MAX});
     while (i < std.math.maxInt(usize) and i > 0) : (i <<= 1) {
         std.debug.print("mi_bin({}): {}\n", .{ i, mi_bin(i) });
         std.debug.print("mi_bin({}): {}\n", .{ i + 5, mi_bin(i + 5) });
@@ -132,7 +134,7 @@ pub fn _mi_bin(size: usize) u8 {
     return mi_bin(size);
 }
 
-fn _mi_bin_size(bin: u8) usize {
+pub fn _mi_bin_size(bin: u8) usize {
     return mi._mi_heap_empty.pages[bin].block_size;
 }
 
@@ -143,7 +145,7 @@ pub inline fn mi_page_queue(heap: *const mi_heap_t, size: usize) *mi_page_queue_
 
 // Good size for allocation
 fn mi_good_size(size: usize) usize {
-    if (size <= mi.MI_MEDIUM_OBJ_SIZE_MAX) {
+    if (size <= MI_MEDIUM_OBJ_SIZE_MAX) {
         return _mi_bin_size(mi_bin(size));
     } else {
         return mi._mi_align_up(size, mi._mi_os_page_size());
@@ -164,22 +166,22 @@ pub fn mi_page_queue_contains(queue: *mi_page_queue_t, page: *const mi_page_t) b
 pub fn mi_heap_contains_queue(heap: *const mi_heap_t, pq: *const mi_page_queue_t) bool {
     if (MI_DEBUG > 1) return true;
     const pq_addr = @ptrToInt(pq);
-    return pq_addr >= @ptrToInt(&heap.pages[0]) and pq_addr <= @ptrToInt(&heap.pages[mi.MI_BIN_FULL]);
+    return pq_addr >= @ptrToInt(&heap.pages[0]) and pq_addr <= @ptrToInt(&heap.pages[MI_BIN_FULL]);
 }
 
 pub fn mi_page_queue_of(page: *const mi_page_t) *mi_page_queue_t {
-    const bin = if (page.is_in_full()) mi.MI_BIN_FULL else mi_bin(page.xblock_size);
+    const bin = if (page.is_in_full()) MI_BIN_FULL else mi_bin(page.xblock_size);
     const heap = mi_page_heap(page).?;
-    assert(bin <= mi.MI_BIN_FULL);
+    assert(bin <= MI_BIN_FULL);
     const pq = &heap.pages[bin];
-    assert(bin >= mi.MI_BIN_HUGE or page.xblock_size == pq.block_size);
+    assert(bin >= MI_BIN_HUGE or page.xblock_size == pq.block_size);
     assert(mi_page_queue_contains(pq, page));
     return pq;
 }
 
 pub fn mi_heap_page_queue_of(heap: *mi_heap_t, page: *mi_page_t) *mi_page_queue_t {
-    const bin = if (mi_page_is_in_full(page)) mi.MI_BIN_FULL else mi_bin(page.xblock_size);
-    assert(bin <= mi.MI_BIN_FULL);
+    const bin = if (mi_page_is_in_full(page)) MI_BIN_FULL else mi_bin(page.xblock_size);
+    assert(bin <= MI_BIN_FULL);
     const pq = &heap.pages[bin];
     assert(mi_page_is_in_full(page) or page.xblock_size == pq.block_size);
     return pq;
@@ -229,7 +231,7 @@ fn mi_heap_queue_first_update(heap: *mi_heap_t, pq: *const mi_page_queue_t) void
 
 pub fn mi_page_queue_remove(pq: *mi_page_queue_t, page: *mi_page_t) void {
     mi_assert_internal(mi_page_queue_contains(pq, page));
-    mi_assert_internal(page.xblock_size == pq.block_size or (page.xblock_size > mi.MI_MEDIUM_OBJ_SIZE_MAX and mi_page_queue_is_huge(pq)) or (mi_page_is_in_full(page) and mi_page_queue_is_full(pq)));
+    mi_assert_internal(page.xblock_size == pq.block_size or (page.xblock_size > MI_MEDIUM_OBJ_SIZE_MAX and mi_page_queue_is_huge(pq)) or (mi_page_is_in_full(page) and mi_page_queue_is_full(pq)));
     const heap = page.heap().?;
 
     if (page.prev != null) page.prev.?.next = page.next;
@@ -252,9 +254,9 @@ pub fn mi_page_queue_push(heap: *mi_heap_t, pq: *mi_page_queue_t, page: *mi_page
     mi_assert_internal(page.heap() == heap);
     mi_assert_internal(!mi_page_queue_contains(pq, page));
 
-    mi_assert_internal(mi._mi_page_segment(page).kind != .MI_SEGMENT_HUGE);
+    mi_assert_internal(_mi_page_segment(page).kind != .MI_SEGMENT_HUGE);
     mi_assert_internal(page.xblock_size == pq.block_size or
-        (page.xblock_size > mi.MI_MEDIUM_OBJ_SIZE_MAX) or
+        (page.xblock_size > MI_MEDIUM_OBJ_SIZE_MAX) or
         (mi_page_is_in_full(page) and mi_page_queue_is_full(pq)));
 
     mi_page_set_in_full(page, mi_page_queue_is_full(pq));
@@ -282,8 +284,8 @@ pub fn mi_page_queue_enqueue_from(to: *mi_page_queue_t, from: *mi_page_queue_t, 
     assert((page.xblock_size == to.block_size and page.xblock_size == from.block_size) or
         (page.xblock_size == to.block_size and mi_page_queue_is_full(from)) or
         (page.xblock_size == from.block_size and mi_page_queue_is_full(to)) or
-        (page.xblock_size > mi.MI_LARGE_OBJ_SIZE_MAX and mi_page_queue_is_huge(from)) or
-        (page.xblock_size > mi.MI_LARGE_OBJ_SIZE_MAX and mi_page_queue_is_full(to)));
+        (page.xblock_size > MI_LARGE_OBJ_SIZE_MAX and mi_page_queue_is_huge(from)) or
+        (page.xblock_size > MI_LARGE_OBJ_SIZE_MAX and mi_page_queue_is_full(to)));
 
     const heap = page.heap().?;
     if (page.prev != null) page.prev.?.next = page.next;
