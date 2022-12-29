@@ -948,9 +948,8 @@ fn mi_os_get_aligned_hint(try_alignment: usize, size_in: usize) ?[*]align(mem.pa
 }
 
 // Helper for shifts
-pub const usize_shift = if (@sizeOf(usize) == 8) u6 else u5;
-pub fn mi_shift_cast(shift: usize) usize_shift {
-    const x = @intCast(usize_shift, shift);
+pub fn mi_shift_cast(shift: usize) std.math.Log2Int(u64) {
+    const x = @intCast(std.math.Log2Int(u64), shift);
     assert(x == shift);
     return x;
 }
