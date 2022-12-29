@@ -32,7 +32,7 @@ const _mi_os_numa_node_count = mi._mi_os_numa_node_count;
 
 const _mi_stats_main = mi._mi_stats_main;
 
-const mi_output_fun = *const fn (msg: []const u8, arg: *void) void;
+const mi_output_fun = *const fn (msg: []const u8, arg: ?*anyopaque) void;
 const mi_snprintf = mi.mi_snprintf;
 const _mi_fprintf = mi._mi_fprintf;
 const _mi_fputs = mi._mi_fputs;
@@ -46,7 +46,7 @@ pub fn mi_is_in_main(stat: *const u8) bool {
 }
 
 inline fn mi_atomic_addi64_relaxed(p: *volatile i64, x: i64) void {
-    @atomicRmw(i64, p, builtin.Add, x, builtin.Monotonic);
+    _ = @atomicRmw(i64, p, AtomicRmwOp.Add, x, AtomicOrder.Monotonic);
 }
 
 inline fn mi_atomic_maxi64_relaxed(p: *volatile i64, x: i64) void {
@@ -160,7 +160,7 @@ fn mi_stats_add(stats: *mi_stats_t, src: *const mi_stats_t) void {
 // unit > 0 : size in binary bytes
 // unit == 0: count as decimal
 // unit < 0 : count in binary
-fn mi_printf_amount(n: i64, unit: i64, out: *mi_output_fun, arg: *opaque {}, fmt: ?[]const u8) void {
+fn mi_printf_amount(n: i64, unit: i64, out: mi_output_fun, arg: *anyopaque, fmt: ?[]const u8) void {
     var buf: [32]u8 = undefined;
     buf[0] = 0;
     const suffix = if (unit <= 0) " " else "B";
@@ -193,11 +193,11 @@ fn mi_printf_amount(n: i64, unit: i64, out: *mi_output_fun, arg: *opaque {}, fmt
     _mi_fprintf(out, arg, if (fmt == null) "%11s" else fmt.?, buf);
 }
 
-fn mi_print_amount(n: i64, unit: i64, out: *mi_output_fun, arg: ?*opaque {}) void {
+fn mi_print_amount(n: i64, unit: i64, out: mi_output_fun, arg: ?*anyopaque) void {
     mi_printf_amount(n, unit, out, arg, null);
 }
 
-fn mi_print_count(n: i64, unit: i64, out: *mi_output_fun, arg: ?*opaque {}) void {
+fn mi_print_count(n: i64, unit: i64, out: mi_output_fun, arg: ?*anyopaque) void {
     if (unit == 1) {
         _mi_fprintf(out, arg, "%11s", " ");
     } else {
@@ -205,7 +205,7 @@ fn mi_print_count(n: i64, unit: i64, out: *mi_output_fun, arg: ?*opaque {}) void
     }
 }
 
-fn mi_stat_print(stat: *const mi_stat_count_t, msg: []const u8, unit: i64, out: *mi_output_fun, arg: *opaque {}) void {
+fn mi_stat_print(stat: *const mi_stat_count_t, msg: []const u8, unit: i64, out: mi_output_fun, arg: ?*anyopaque) void {
     _mi_fprintf(out, arg, "%10s:", msg);
     if (unit > 0) {
         mi_print_amount(stat.peak, unit, out, arg);
@@ -244,24 +244,24 @@ fn mi_stat_print(stat: *const mi_stat_count_t, msg: []const u8, unit: i64, out: 
     }
 }
 
-fn mi_stat_counter_print(stat: *const mi_stat_counter_t, msg: []const u8, out: *mi_output_fun, arg: *opaque {}) void {
+fn mi_stat_counter_print(stat: *const mi_stat_counter_t, msg: []const u8, out: mi_output_fun, arg: ?*anyopaque) void {
     _mi_fprintf(out, arg, "%10s:", msg);
     mi_print_amount(stat.total, -1, out, arg);
     _mi_fprintf(out, arg, "\n");
 }
 
-fn mi_stat_counter_print_avg(stat: *const mi_stat_counter_t, msg: []const u8, out: *mi_output_fun, arg: *opaque {}) void {
+fn mi_stat_counter_print_avg(stat: *const mi_stat_counter_t, msg: []const u8, out: mi_output_fun, arg: ?*anyopaque) void {
     const avg_tens = if (stat.count == 0) 0 else (stat.total * 10 / stat.count);
     const avg_whole = (avg_tens / 10);
     const avg_frac1 = (avg_tens % 10);
     _mi_fprintf(out, arg, "%10s: %5ld.%ld avg\n", msg, avg_whole, avg_frac1);
 }
 
-fn mi_print_header(out: *mi_output_fun, arg: *opaque {}) void {
+fn mi_print_header(out: mi_output_fun, arg: ?*anyopaque) void {
     _mi_fprintf(out, arg, "%10s: %10s %10s %10s %10s %10s %10s\n", "heap stats", "peak   ", "total   ", "freed   ", "current   ", "unit   ", "count   ");
 }
 
-fn mi_stats_print_bins(bins: *const mi_stat_count_t, max: usize, fmt: []const u8, out: *mi_output_fun, arg: *opaque {}) void {
+fn mi_stats_print_bins(bins: [*]const mi_stat_count_t, max: usize, fmt: []const u8, out: mi_output_fun, arg: ?*anyopaque) void {
     if (MI_STAT <= 1) return;
 
     var found = false;
@@ -287,7 +287,7 @@ fn mi_stats_print_bins(bins: *const mi_stat_count_t, max: usize, fmt: []const u8
 //------------------------------------------------------------
 const buffered_t = struct {
     out: mi_output_fun, // original output function
-    arg: *opaque {}, // and state
+    arg: ?*anyopaque, // and state
     buf: []u8, // local buffer of at least size `count+1`
     used: usize, // currently used chars `used <= count`
     count: usize, // total chars available for output
@@ -299,7 +299,7 @@ fn mi_buffered_flush(buf: *buffered_t) void {
     buf.used = 0;
 }
 
-fn mi_buffered_out(msg: []const u8, arg: *opaque {}) void {
+fn mi_buffered_out(msg: []const u8, arg: ?*anyopaque) void {
     var buf = @ptrCast(*buffered_t, arg);
     for (msg) |c| {
         if (buf.used >= buf.count) mi_buffered_flush(buf);
@@ -325,17 +325,17 @@ fn mi_stat_process_info(elapsed: *mi_msecs_t, utime: *mi_msecs_t, stime: *mi_mse
     _ = page_faults;
 }
 
-fn _mi_stats_print(stats: *mi_stats_t, out0: mi_output_fun, arg0: *opaque {}) void {
+fn _mi_stats_print(stats: *mi_stats_t, out0: mi_output_fun, arg0: ?*anyopaque) void {
     // wrap the output function to be line buffered
     var buf: [256]u8 = undefined;
-    var buffer = buffered_t{ .out = out0, .arg = arg0, .buf = buf, .used = 0, .count = 255 };
+    var buffer = buffered_t{ .out = out0, .arg = arg0, .buf = &buf, .used = 0, .count = 255 };
     const out = &mi_buffered_out;
     const arg = &buffer;
 
     // and print using that
     mi_print_header(out, arg);
     if (MI_STAT > 1)
-        mi_stats_print_bins(stats.normal_bins, MI_BIN_HUGE, "normal", out, arg);
+        mi_stats_print_bins(&stats.normal_bins, MI_BIN_HUGE, "normal", out, arg);
     if (MI_STAT > 0) {
         mi_stat_print(&stats.normal, "normal", if (stats.normal_count.count == 0) 1 else -(stats.normal.allocated / stats.normal_count.count), out, arg);
         mi_stat_print(&stats.large, "large", if (stats.large_count.count == 0) 1 else -(stats.large.allocated / stats.large_count.count), out, arg);
@@ -396,7 +396,7 @@ fn mi_stats_get_default() *mi_stats_t {
 fn mi_stats_merge_from(stats: *mi_stats_t) void {
     if (stats != &mi._mi_stats_main) {
         mi_stats_add(&mi._mi_stats_main, stats);
-        stats = .{};
+        stats.* = .{};
         // memset(stats, 0, sizeof(mi_stats_t));
     }
 }
@@ -420,17 +420,17 @@ fn _mi_stats_done(stats: *mi_stats_t) void { // called from `mi_thread_done`
     mi_stats_merge_from(stats);
 }
 
-fn mi_stats_print_out(out: mi_output_fun, arg: ?*opaque {}) void {
+fn mi_stats_print_out(out: mi_output_fun, arg: ?*anyopaque) void {
     mi_stats_merge_from(mi_stats_get_default());
     _mi_stats_print(&mi._mi_stats_main, out, arg);
 }
 
-fn mi_stats_print(out: *opaque {}) void {
+pub fn mi_stats_print(out: ?*anyopaque) void {
     // for compatibility there is an `out` parameter (which can be `stdout` or `stderr`)
     mi_stats_print_out(@ptrCast(mi_output_fun, out), null);
 }
 
-fn mi_thread_stats_print_out(out: mi_output_fun, arg: *opaque {}) void {
+fn mi_thread_stats_print_out(out: mi_output_fun, arg: ?*anyopaque) void {
     _mi_stats_print(mi_stats_get_default(), out, arg);
 }
 
