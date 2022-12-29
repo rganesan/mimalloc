@@ -12,6 +12,7 @@
 //------------------------------------------------------------
 
 const std = @import("std");
+const math = std.math;
 const assert = std.debug.assert;
 const Atomic = std.atomic.Atomic;
 const AtomicOrder = std.builtin.AtomicOrder;
@@ -174,29 +175,30 @@ pub fn mi_page_immediate_available(page: *const mi_page_t) bool {
 fn mi_rotl(x: usize, shift: usize) usize {
     const shift_bits = shift % MI_INTPTR_BITS;
     if (shift_bits == 0) return x;
-    const shift_type = if (@sizeOf(usize) == 4) u5 else u6;
-    const shl_bits = @intCast(shift_type, shift_bits);
-    const shr_bits = @intCast(shift_type, MI_INTPTR_BITS - shift_bits);
-    return (x << shl_bits) | (x >> shr_bits);
+    return math.shl(usize, x, shift_bits) | math.shr(usize, x, MI_INTPTR_BITS - shift_bits);
 }
 
 fn mi_rotr(x: usize, shift: usize) usize {
     const shift_bits = shift % MI_INTPTR_BITS;
     if (shift_bits == 0) return x;
-    const shift_type = if (@sizeOf(usize) == 4) u5 else u6;
-    const shr_bits = @intCast(shift_type, shift_bits);
-    const shl_bits = @intCast(shift_type, MI_INTPTR_BITS - shift_bits);
-    return (x >> shr_bits) | (x << shl_bits);
+    return math.shr(usize, x, shift_bits) | math.shl(usize, x, MI_INTPTR_BITS - shift_bits);
+}
+
+// This is needed for double free check, zig does alignment checks can't use mi_ptr_decode
+pub fn mi_ptr_decode_raw(ptr: anytype, x: mi_encoded_t, keys: []const usize) usize {
+    const decoded = mi_rotr(x - @truncate(u63, keys[0]), keys[0]) ^ keys[1];
+    return if (decoded == @ptrToInt(ptr)) 0 else decoded; // TODO: This looks weird
 }
 
 fn mi_ptr_decode(ptr: anytype, x: mi_encoded_t, keys: []const usize) ?*mi_block_t {
-    const p = @intToPtr(?*mi_block_t, mi_rotr(x - keys[0], keys[0]) ^ keys[1]);
-    return if (p == @ptrCast(*const mi_block_t, ptr)) null else p; // TODO: This looks weird
+    const decoded = mi_ptr_decode_raw(ptr, x, keys);
+    return @intToPtr(?*mi_block_t, decoded);
 }
 
 pub fn mi_ptr_encode(ptr: anytype, block: ?*const mi_block_t, keys: []const usize) mi_encoded_t {
     const x = if (block == null) @ptrToInt(ptr) else @ptrToInt(block);
-    return mi_rotl(x ^ keys[1], keys[0]) + keys[0];
+    const encoded = mi_rotl(x ^ keys[1], keys[0]) +% keys[0];
+    return encoded;
 }
 
 pub fn mi_block_nextx(ptr: anytype, block: *const mi_block_t, keys: []const usize) ?*mi_block_t {
@@ -231,7 +233,7 @@ pub fn _mi_memzero_aligned(dest: [*]u8, n: usize) void {
 // Segment belonging to a page
 pub fn _mi_page_segment(page: *const mi_page_t) *mi_segment_t {
     const segment = _mi_ptr_segment(page);
-    mi_assert_internal(@ptrToInt(page) >= @ptrToInt(&segment.slices) and @ptrToInt(page) < @ptrToInt(&segment.slices[segment.slice_entries]));
+    mi_assert_internal(@ptrToInt(page) >= @ptrToInt(&segment.slices) and @ptrToInt(page) < @ptrToInt((@ptrCast([*]mi_segment_t, &segment.slices) + segment.slice_entries)));
     return segment;
 }
 
@@ -504,8 +506,8 @@ fn mi_page_fresh_alloc(heap: *mi_heap_t, pq: ?*mi_page_queue_t, block_size: usiz
 fn mi_page_fresh(heap: *mi_heap_t, pq: *mi_page_queue_t) ?*mi_page_t {
     mi_assert_internal(heap.contains(pq));
     const page = mi_page_fresh_alloc(heap, pq, pq.block_size) orelse return null;
-    mi_assert_internal(pq.block_size == page.block_size());
-    mi_assert_internal(pq == mi_page_queue(heap, page.block_size()));
+    mi_assert_internal(pq.block_size == mi_page_block_size(page));
+    mi_assert_internal(pq == mi_page_queue(heap, mi_page_block_size(page)));
     return page;
 }
 
@@ -658,7 +660,7 @@ pub fn _mi_page_retire(page: *mi_page_t) void {
             page.b.retire_expire = 1 + if (page.xblock_size <= @intCast(usize, MI_SMALL_OBJ_SIZE_MAX)) @intCast(u7, MI_RETIRE_CYCLES) else @intCast(u7, MI_RETIRE_CYCLES / 4);
             const heap = mi_page_heap(page).?;
             mi_assert_internal(@ptrToInt(pq) >= @ptrToInt(&heap.pages));
-            const index = @ptrToInt(pq) - @ptrToInt(&heap.pages);
+            const index = (@ptrToInt(pq) - @ptrToInt(&heap.pages)) / @sizeOf(mi_page_queue_t);
             mi_assert_internal(index < MI_BIN_FULL and index < MI_BIN_HUGE);
             if (index < heap.page_retired_min) heap.page_retired_min = index;
             if (index > heap.page_retired_max) heap.page_retired_max = index;
