@@ -200,7 +200,7 @@ pub fn mi_heap_collect(heap: *mi_heap_t, force: bool) void {
     mi_heap_collect_ex(heap, if (force) .MI_FORCE else .MI_NORMAL);
 }
 
-fn mi_collect(force: bool) void {
+pub fn mi_collect(force: bool) void {
     mi_heap_collect(mi.mi_get_default_heap(), force);
 }
 
@@ -226,9 +226,11 @@ pub fn mi_heap_new_in_arena(arena_id: mi.arena_id_t) *mi_heap_t {
     heap.tld = bheap.tld;
     heap.thread_id = Thread.currentId();
     heap.arena_id = arena_id;
-    heap.cookie = heap.random.int(u64) | 1;
-    heap.keys[0] = heap.random.int(u64);
-    heap.keys[1] = heap.random.int(u64);
+    heap.random = std.rand.DefaultPrng.init(std.crypto.random.int(u64));
+    const random = heap.random.random();
+    heap.cookie = random.int(u64) | 1;
+    heap.keys[0] = random.int(u64);
+    heap.keys[1] = random.int(u64);
     heap.no_reclaim = true; // don't reclaim abandoned pages or otherwise destroy is unsafe
     // push on the thread local heaps list
     heap.next = heap.tld.heaps;
@@ -248,7 +250,7 @@ pub fn _mi_heap_memid_is_suitable(heap: *mi_heap_t, memid: usize) bool {
 }
 
 pub fn _mi_heap_random_next(heap: *mi_heap_t) usize {
-    return heap.random.int(usize);
+    return heap.random.random().int(usize);
 }
 
 // zero out the page queues

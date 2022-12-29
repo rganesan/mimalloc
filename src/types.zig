@@ -279,12 +279,12 @@ pub const mi_page_t = struct {
 
     pub fn block_size(self: *const Self) usize {
         const bsize = self.xblock_size;
-        assert(bsize == 0);
+        assert(bsize > 0);
         if (bsize < MI_HUGE_BLOCK_SIZE) {
             return bsize;
         }
         var psize: usize = undefined;
-        // TODO: segment.zig: _mi_segment_page_start(_mi_page_segment(page), page, &psize);
+        _ = mi._mi_segment_page_start(mi._mi_page_segment(self), self, &psize);
         psize = 0;
         return psize;
     }
@@ -469,7 +469,7 @@ pub const mi_heap_t = struct {
     arena_id: mi_arena_id_t = 0, // arena id if the heap belongs to a specific arena (or 0)
     cookie: usize = 0, // random cookie to verify pointers (see `_ptr_cookie`)
     keys: [2]usize = .{ 0, 0 }, // two random keys used to encode the `thread_delayed_free` list
-    random: Random = undefined, // random number context used for secure allocation
+    random: Prng = undefined, // random number context used for secure allocation
     page_count: usize = 0, // total number of pages in the `pages` queues.
     page_retired_min: usize = MI_BIN_FULL, // smallest retired index (retired pages are fully free, but still in the page queues)
     page_retired_max: usize = 0, // largest retired index into the `pages` array.
@@ -950,7 +950,9 @@ fn mi_os_get_aligned_hint(try_alignment: usize, size_in: usize) ?[*]align(mem.pa
 // Helper for shifts
 pub const usize_shift = if (@sizeOf(usize) == 8) u6 else u5;
 pub fn mi_shift_cast(shift: usize) usize_shift {
-    return @intCast(usize_shift, shift);
+    const x = @intCast(usize_shift, shift);
+    assert(x == shift);
+    return x;
 }
 
 // -------------------------------------------------------------------

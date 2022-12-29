@@ -178,11 +178,11 @@ fn mi_heap_main_init() void {
 
         _mi_heap_main.tld = &mi_tld_main;
         _mi_heap_main.thread_id = _mi_thread_id();
-        var rng = Prng.init(crandom.int(u64));
-        _mi_heap_main.random = rng.random();
-        _mi_heap_main.cookie = _mi_heap_main.random.int(u64);
-        _mi_heap_main.keys[0] = _mi_heap_main.random.int(u64);
-        _mi_heap_main.keys[1] = _mi_heap_main.random.int(u64);
+        _mi_heap_main.random = Prng.init(crandom.int(u64));
+        const random = _mi_heap_main.random.random();
+        _mi_heap_main.cookie = random.int(u64);
+        _mi_heap_main.keys[0] = random.int(u64);
+        _mi_heap_main.keys[1] = random.int(u64);
     }
 }
 
@@ -283,11 +283,11 @@ fn _mi_heap_init() bool {
         var tld = &td.tld;
         var heap = &td.heap;
         heap.thread_id = Thread.getCurrentId();
-        var rng = Prng.init(crandom.int(u64));
-        heap.random = rng.random();
-        heap.cookie = heap.random.int(u64) | 1;
-        heap.keys[0] = heap.random.int(u64);
-        heap.keys[1] = heap.random.int(u64);
+        heap.random = Prng.init(crandom.int(u64));
+        const random = heap.random.random();
+        heap.cookie = random.int(u64) | 1;
+        heap.keys[0] = random.int(u64);
+        heap.keys[1] = random.int(u64);
         heap.tld = tld;
         tld.heap_backing = heap;
         tld.heaps = heap;
@@ -467,7 +467,7 @@ pub fn mi_process_init() void {
     }
 }
 
-var mi_is_process_done: bool = false;
+var process_done: bool = false;
 const MI_SHARED_LIB = false;
 
 // Called when the process is done (through `at_exit`)
@@ -475,8 +475,8 @@ pub fn mi_process_done() void {
     // only shutdown if we were initialized
     if (!_mi_process_is_initialized) return;
     // ensure we are called once
-    if (mi_process_done) return;
-    mi_process_done = true;
+    if (process_done) return;
+    process_done = true;
 
     if (MI_DEBUG != 0 or !MI_SHARED_LIB) {
         // free all memory if possible on process exit. This is not needed for a stand-alone process
@@ -484,7 +484,7 @@ pub fn mi_process_done() void {
         // is repeatedly loaded/unloaded, see issue #281.
         mi_collect(true); // force
     }
-    if (mi_option_is_enabled(mi_option_show_stats) || mi_option_is_enabled(mi_option_verbose)) {
+    if (mi_option_is_enabled(.mi_option_show_stats) or mi_option_is_enabled(.mi_option_verbose)) {
         mi_stats_print(null);
     }
     std.log.debug("process done: {}", .{_mi_heap_main.thread_id});
