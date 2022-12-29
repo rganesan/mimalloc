@@ -352,9 +352,9 @@ fn mi_check_is_double_freex(page: *const mi_page_t, block: *const mi_block_t) bo
 fn mi_check_is_double_free(page: *const mi_page_t, block: *const mi_block_t) bool {
     if (!MI_ENCODE_FREELIST or (MI_SECURE < 4 and MI_DEBUG == 0)) return false;
     var is_double_free = false;
-    const n = mi_block_nextx(page, block, &page.keys); // pretend it is freed, and get the decoded first field
-    if ((@ptrToInt(n) & (MI_INTPTR_SIZE - 1)) == 0 and // quick check: aligned pointer?
-        (n == null or mi_is_in_same_page(block, n.?)))
+    const n = mi.mi_ptr_decode_raw(page, block.next, &page.keys); // pretend it is freed, and get the decoded first field
+    if ((n & (MI_INTPTR_SIZE - 1)) == 0 and // quick check: aligned pointer?
+        (n == 0 or mi_is_in_same_page(block, @intToPtr(*mi_block_t, n))))
     {
         // Suspicous: decoded value a in block is in the same page (or null) -- maybe a double free?
         // (continue in separate function to improve code generation)
