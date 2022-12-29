@@ -300,7 +300,7 @@ fn mi_buffered_flush(buf: *buffered_t) void {
 }
 
 fn mi_buffered_out(msg: []const u8, arg: ?*anyopaque) void {
-    var buf = @ptrCast(*buffered_t, arg);
+    var buf = @ptrCast(*buffered_t, @alignCast(@alignOf(buffered_t), arg));
     for (msg) |c| {
         if (buf.used >= buf.count) mi_buffered_flush(buf);
         assert(buf.used < buf.count);
@@ -337,9 +337,9 @@ fn _mi_stats_print(stats: *mi_stats_t, out0: mi_output_fun, arg0: ?*anyopaque) v
     if (MI_STAT > 1)
         mi_stats_print_bins(&stats.normal_bins, MI_BIN_HUGE, "normal", out, arg);
     if (MI_STAT > 0) {
-        mi_stat_print(&stats.normal, "normal", if (stats.normal_count.count == 0) 1 else -(stats.normal.allocated / stats.normal_count.count), out, arg);
-        mi_stat_print(&stats.large, "large", if (stats.large_count.count == 0) 1 else -(stats.large.allocated / stats.large_count.count), out, arg);
-        mi_stat_print(&stats.huge, "huge", if (stats.huge_count.count == 0) 1 else -(stats.huge.allocated / stats.huge_count.count), out, arg);
+        mi_stat_print(&stats.normal, "normal", if (stats.normal_count.count == 0) 1 else -@divTrunc(stats.normal.allocated, stats.normal_count.count), out, arg);
+        mi_stat_print(&stats.large, "large", if (stats.large_count.count == 0) 1 else -@divTrunc(stats.large.allocated, stats.large_count.count), out, arg);
+        mi_stat_print(&stats.huge, "huge", if (stats.huge_count.count == 0) 1 else -@divTrunc(stats.huge.allocated, stats.huge_count.count), out, arg);
         var total: mi_stat_count_t = .{};
         mi_stat_add(&total, &stats.normal, 1);
         mi_stat_add(&total, &stats.large, 1);
