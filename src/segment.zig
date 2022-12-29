@@ -649,7 +649,7 @@ fn mi_segment_os_free(segment: *mi_segment_t, tld: *mi_segments_tld_t) void {
 }
 
 // called by threads that are terminating
-fn _mi_segment_thread_collect(tld: *mi_segments_tld_t) void {
+pub fn _mi_segment_thread_collect(tld: *mi_segments_tld_t) void {
     _ = tld;
     // nothing to do
 }
@@ -1447,8 +1447,7 @@ fn mi_segment_abandon(segment: *mi_segment_t, tld: *mi_segments_tld_t) void {
     mi_abandoned_push(segment);
 }
 
-fn _mi_segment_page_abandon(page: *mi_page_t, tld: *mi_segments_tld_t) void {
-    mi_assert(page != null);
+pub fn _mi_segment_page_abandon(page: *mi_page_t, tld: *mi_segments_tld_t) void {
     mi_assert_internal(mi_page_thread_free_flag(page) == .MI_NEVER_DELAYED_FREE);
     mi_assert_internal(mi_page_heap(page) == null);
     var segment = _mi_page_segment(page);
@@ -1456,7 +1455,7 @@ fn _mi_segment_page_abandon(page: *mi_page_t, tld: *mi_segments_tld_t) void {
     mi_assert_expensive(mi_segment_is_valid(segment, tld));
     segment.abandoned += 1;
 
-    _mi_stat_increase(&tld.stats.pages_abandoned, 1);
+    _mi_stat_increase(&tld.stats.?.pages_abandoned, 1);
     mi_assert_internal(segment.abandoned <= segment.used);
     if (segment.used == segment.abandoned) {
         // all pages are abandoned, abandon the entire segment
@@ -1584,10 +1583,10 @@ fn mi_segment_reclaim(segment: *mi_segment_t, heap: *mi_heap_t, requested_block_
     }
 }
 
-fn _mi_abandoned_reclaim_all(heap: *mi_heap_t, tld: *mi_segments_tld_t) void {
+pub fn _mi_abandoned_reclaim_all(heap: *mi_heap_t, tld: *mi_segments_tld_t) void {
     var segment = mi_abandoned_pop();
     while (segment != null) : (segment = mi_abandoned_pop()) {
-        mi_segment_reclaim(segment, heap, 0, null, tld);
+        _ = mi_segment_reclaim(segment.?, heap, 0, null, tld);
     }
 }
 
@@ -1628,24 +1627,23 @@ fn mi_segment_try_reclaim(heap: *mi_heap_t, needed_slices: usize, block_size: us
     return null;
 }
 
-fn _mi_abandoned_collect(heap: *mi_heap_t, force: bool, tld: *mi_segments_tld_t) void {
-    var max_tries = if (force) 16 * 1024 else 1024; // limit latency
+pub fn _mi_abandoned_collect(heap: *mi_heap_t, force: bool, tld: *mi_segments_tld_t) void {
+    var max_tries: usize = if (force) 16 * 1024 else 1024; // limit latency
     if (force) {
-        mi_abandoned_visited_revisit();
+        _ = mi_abandoned_visited_revisit();
     }
     while (max_tries > 0) : (max_tries -= 1) {
-        var segment = mi_abandoned_pop();
-        if (segment == null) break;
-        mi_segment_check_free(segment, 0, 0, tld); // try to free up pages (due to concurrent frees)
+        var segment = mi_abandoned_pop() orelse break;
+        _ = mi_segment_check_free(segment, 0, 0, tld); // try to free up pages (due to concurrent frees)
         if (segment.used == 0) {
             // free the segment (by forced reclaim) to make it available to other threads.
             // note: we could in principle optimize this by skipping reclaim and directly
             // freeing but that would violate some invariants temporarily)
-            mi_segment_reclaim(segment, heap, 0, null, tld);
+            _ = mi_segment_reclaim(segment, heap, 0, null, tld);
         } else {
             // otherwise, decommit if needed and push on the visited list
             // note: forced decommit can be expensive if many threads are destroyed/created as in mstress.
-            mi_segment_delayed_decommit(segment, force, tld.stats);
+            mi_segment_delayed_decommit(segment, force, tld.stats.?);
             mi_abandoned_visited_push(segment);
         }
     }

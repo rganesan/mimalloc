@@ -186,7 +186,7 @@ fn mi_rotr(x: usize, shift: usize) usize {
 
 // This is needed for double free check, zig does alignment checks can't use mi_ptr_decode
 pub fn mi_ptr_decode_raw(ptr: anytype, x: mi_encoded_t, keys: []const usize) usize {
-    const decoded = mi_rotr(x - @truncate(u63, keys[0]), keys[0]) ^ keys[1];
+    const decoded = mi_rotr(x -% keys[0], keys[0]) ^ keys[1];
     return if (decoded == @ptrToInt(ptr)) 0 else decoded; // TODO: This looks weird
 }
 
@@ -586,10 +586,10 @@ pub fn _mi_page_abandon(page: *mi_page_t, pq: *mi_page_queue_t) void {
     mi_assert_internal(pq == mi_page_queue_of(page));
     mi_assert_internal(mi_page_heap(page) != null);
 
-    const pheap = mi_page_heap(page);
+    const pheap = mi_page_heap(page).?;
 
     // remove from our page list
-    const segments_tld = &pheap.tld.segments;
+    const segments_tld = &pheap.tld.?.segments;
     mi_page_queue_remove(pq, page);
 
     // page is no longer associated with our heap
@@ -598,9 +598,9 @@ pub fn _mi_page_abandon(page: *mi_page_t, pq: *mi_page_queue_t) void {
 
     if (MI_DEBUG > 1) {
         // check there are no references left..
-        var block = pheap.thread_delayed_free;
-        while (block != null) : (block = mi_block_nextx(pheap, block, pheap.keys)) {
-            mi_assert_internal(_mi_ptr_page(block) != page);
+        var block = pheap.thread_delayed_free.load(AtomicOrder.Monotonic);
+        while (block != null) : (block = mi_block_nextx(pheap, block.?, &pheap.keys)) {
+            mi_assert_internal(_mi_ptr_page(block.?) != page);
         }
     }
 

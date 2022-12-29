@@ -14,7 +14,10 @@ const assert = std.debug.assert;
 const mi = struct {
     usingnamespace @import("types.zig");
     usingnamespace @import("init.zig");
+    usingnamespace @import("page.zig");
     usingnamespace @import("stats.zig");
+    usingnamespace @import("segment.zig");
+    usingnamespace @import("segment-cache.zig");
     usingnamespace @import("options.zig");
 
     fn noop(cond: bool) void {
@@ -41,6 +44,25 @@ const MI_PADDING_SIZE = mi.MI_PADDING_SIZE;
 // Function aliases
 const _mi_heap_set_default_direct = mi._mi_heap_set_default_direct;
 const _mi_wsize_from_size = mi._mi_wsize_from_size;
+const _mi_page_free_collect = mi._mi_page_free_collect;
+const _mi_page_free = mi._mi_page_free;
+const _mi_page_abandon = mi._mi_page_abandon;
+const _mi_page_queue_append = mi._mi_page_queue_append;
+const _mi_page_use_delayed_free = mi._mi_page_use_delayed_free;
+const mi_page_all_free = mi.mi_page_all_free;
+const _mi_deferred_free = mi._mi_deferred_free;
+const _mi_heap_delayed_free_all = mi._mi_heap_delayed_free_all;
+const _mi_heap_collect_retired = mi._mi_heap_collect_retired;
+const _mi_abandoned_collect = mi._mi_abandoned_collect;
+const _mi_segment_thread_collect = mi._mi_segment_thread_collect;
+const _mi_segment_cache_collect = mi._mi_segment_cache_collect;
+const _mi_segment_page_free = mi._mi_segment_page_free;
+const _mi_heap_delayed_free_partial = mi._mi_heap_delayed_free_partial;
+
+const _mi_abandoned_reclaim_all = mi._mi_abandoned_reclaim_all;
+
+const _mi_stat_increase = mi._mi_stats_increase;
+const _mi_stat_decrease = mi._mi_stats_decrease;
 
 const NDEBUG = false;
 const Arg1 = opaque {};
@@ -120,14 +142,14 @@ fn mi_heap_page_collect(heap: *mi_heap_t, pq: *mi_page_queue_t, page: *mi_page_t
     _ = arg2;
     assert(mi_heap_page_is_valid(heap, pq, page, null, null));
     const collect = @ptrCast(*const mi_collect_t, args_collect).*;
-    // TODO: page.zig: mi._mi_page_free_collect(page, collect >= .MI_FORCE);
-    if (page.all_free()) {
+    _mi_page_free_collect(page, @enumToInt(collect) >= @enumToInt(mi_collect_t.MI_FORCE));
+    if (mi_page_all_free(page)) {
         // no more used blocks, free the page.
         // note: this will free retired pages as well.
-        // TODO: page.zig: mi._mi_page_free(page, pq, collect >= .MI_FORCE);
+        _mi_page_free(page, pq, @enumToInt(collect) >= @enumToInt(mi_collect_t.MI_FORCE));
     } else if (collect == .MI_ABANDON) {
         // still used blocks but the thread is done; abandon the page
-        // TODO: page.zig: mi._mi_page_abandon(page, pq);
+        _mi_page_abandon(page, pq);
     }
     return true; // don't break
 }
@@ -137,8 +159,7 @@ fn mi_heap_page_never_delayed_free(heap: *mi_heap_t, pq: *mi_page_queue_t, page:
     _ = pq;
     _ = arg1;
     _ = arg2;
-    _ = page;
-    // TODO: page.zig: mi._mi_page_use_delayed_free(page, mi.NEVER_DELAYED_FREE, false);
+    _mi_page_use_delayed_free(page, .MI_NEVER_DELAYED_FREE, false);
     return true; // don't break
 }
 
@@ -146,7 +167,7 @@ fn mi_heap_collect_ex(heap: *mi_heap_t, collect: mi_collect_t) void {
     if (!heap.is_initialized()) return;
 
     const force = @enumToInt(collect) >= @enumToInt(mi_collect_t.MI_FORCE);
-    // TODO: page.zig: mi._mi_deferred_free(heap, force);
+    _mi_deferred_free(heap, force);
 
     // note: never reclaim on collect but leave it to threads that need storage to reclaim
     const force_main = mi._mi_is_main_thread() and heap.is_backing() and !heap.no_reclaim and if (NDEBUG) collect == .MI_FORCE else force;
@@ -154,7 +175,7 @@ fn mi_heap_collect_ex(heap: *mi_heap_t, collect: mi_collect_t) void {
     if (force_main) {
         // the main thread is abandoned (end-of-program), try to reclaim all abandoned segments.
         // if all memory is freed by now, all segments should be freed.
-        // TODO: segment.zig: mi._mi_abandoned_reclaim_all(heap, &heap.tld.segments);
+        _mi_abandoned_reclaim_all(heap, &heap.tld.?.segments);
     }
 
     // if abandoning, mark all pages to no longer add to delayed_free
@@ -164,10 +185,10 @@ fn mi_heap_collect_ex(heap: *mi_heap_t, collect: mi_collect_t) void {
 
     // free all current thread delayed blocks.
     // (if abandoning, after this there are no more thread-delayed references into the pages.)
-    // TODO: page.zig: mi._mi_heap_delayed_free_all(heap);
+    _mi_heap_delayed_free_all(heap);
 
     // collect retired pages
-    // TODO: page.zig: mi._mi_heap_collect_retired(heap, force);
+    _mi_heap_collect_retired(heap, force);
 
     // collect all pages owned by this thread
     _ = mi_heap_visit_pages(heap, mi_heap_page_collect, @ptrCast(*const Arg1, &collect), null);
@@ -175,20 +196,20 @@ fn mi_heap_collect_ex(heap: *mi_heap_t, collect: mi_collect_t) void {
 
     // collect abandoned segments (in particular, decommit expired parts of segments in the abandoned segment list)
     // note: forced decommit can be quite expensive if many threads are created/destroyed so we do not force on abandonment
-    //TODO: segment.zig: mi._mi_abandoned_collect(heap, collect == .MI_FORCE, &heap.tld.segments);
+    _mi_abandoned_collect(heap, collect == .MI_FORCE, &heap.tld.?.segments);
 
     // collect segment local caches
     if (force) {
-        // TODO: segment.zig: mi._mi_segment_thread_collect(&heap.tld.segments);
+        _mi_segment_thread_collect(&heap.tld.?.segments);
     }
 
     // decommit in global segment caches
     // note: forced decommit can be quite expensive if many threads are created/destroyed so we do not force on abandonment
-    // TODO: segment.zig: mi._mi_segment_cache_collect(collect == .MI_FORCE, &heap.tld.os);
+    _mi_segment_cache_collect(collect == .MI_FORCE, &heap.tld.?.os);
 
     // collect regions on program-exit (or shared library unload)
     if (force and mi._mi_is_main_thread() and heap.is_backing()) {
-        // TODO: region.zig: _mi_mem_collect(&heap.tld.os);
+        //  _mi_mem_collect(&heap.tld.os);
     }
 }
 
@@ -243,10 +264,7 @@ pub fn mi_heap_new() *mi_heap_t {
 }
 
 pub fn _mi_heap_memid_is_suitable(heap: *mi_heap_t, memid: usize) bool {
-    _ = heap;
-    _ = memid;
-    return true; // TODO - arena.zig
-    // return mi._mi_arena_memid_is_suitable(memid, heap.arena_id);
+    return mi._mi_arena_memid_is_suitable(memid, heap.arena_id);
 }
 
 pub fn _mi_heap_random_next(heap: *mi_heap_t) usize {
@@ -293,7 +311,7 @@ fn mi_heap_free(heap: *mi_heap_t) void {
     assert(heap.tld.?.heaps != null);
 
     // and free the used memory
-    // TODO: mi.mi_free(heap);
+    mi.mi_free(heap);
 }
 
 //-- -----------------------------------------------------------
@@ -305,7 +323,7 @@ fn _mi_heap_page_destroy(heap: *mi_heap_t, pq: *mi_page_queue_t, page: *mi_page_
     _ = arg1;
     _ = arg2;
     // ensure no more thread_delayed_free will be added
-    // TODO: mi._mi_page_use_delayed_free(page, mi.NEVER_DELAYED_FREE, false);
+    _mi_page_use_delayed_free(page, mi.NEVER_DELAYED_FREE, false);
 
     // stats
     const bsize = page.block_size();
@@ -317,15 +335,15 @@ fn _mi_heap_page_destroy(heap: *mi_heap_t, pq: *mi_page_queue_t, page: *mi_page_
         }
     }
     if (mi.MI_STAT > 0) {
-        //TODO: page.zig: mi._mi_page_free_collect(page, false); // update used count
+        _mi_page_free_collect(page, false); // update used count
         const inuse = page.used;
         if (bsize <= mi.MI_LARGE_OBJ_SIZE_MAX) {
             mi._mi_stat_decrease(&heap.tld.?.stats.normal, bsize * inuse);
             if (mi.MI_STAT > 1)
-                // TODO: page_queue.zig: mi.mi_stat_decrease(&heap.tld.?.stats.normal_bins[mi._mi_bin(bsize)], inuse);
-                mi._mi_stat_decrease(&heap.tld.?.stats.normal_bins[0], inuse);
+                _mi_stat_decrease(&heap.tld.?.stats.normal_bins[mi._mi_bin(bsize)], inuse);
+            _mi_stat_decrease(&heap.tld.?.stats.normal_bins[0], inuse);
         }
-        mi._mi_stat_decrease(&heap.tld.?.stats.malloc, bsize * inuse); // todo: off for aligned blocks...
+        _mi_stat_decrease(&heap.tld.?.stats.malloc, bsize * inuse); // todo: off for aligned blocks...
     }
 
     // pretend it is all free now
@@ -337,7 +355,7 @@ fn _mi_heap_page_destroy(heap: *mi_heap_t, pq: *mi_page_queue_t, page: *mi_page_
     page.next = null;
     page.prev = null;
     // no force
-    //TODO: segment.zig: mi._mi_segment_page_free(page, false, &heap.tld.segments);
+    _mi_segment_page_free(page, false, &heap.tld.segments);
 
     return true; // keep going
 }
@@ -370,7 +388,7 @@ fn mi_heap_absorb(heap: *mi_heap_t, from: *mi_heap_t) void {
     if (from.page_count == 0) return;
 
     // reduce the size of the delayed frees
-    // TODO page.zig: mi._mi_heap_delayed_free_partial(from);
+    _mi_heap_delayed_free_partial(from);
 
     // transfer all pages by appending the queues; this will set a new heap field
     // so threads may do delayed frees in either heap for a while.
@@ -381,9 +399,7 @@ fn mi_heap_absorb(heap: *mi_heap_t, from: *mi_heap_t) void {
     while (i <= MI_BIN_FULL) : (i += 1) {
         const pq = &heap.pages[i];
         const append = &from.pages[i];
-        _ = pq;
-        _ = append;
-        const pcount = 0; // TODO: page.zig: mi._mi_page_queue_append(heap, pq, append);
+        const pcount = _mi_page_queue_append(heap, pq, append);
         heap.page_count += pcount;
         from.page_count -= pcount;
     }
@@ -393,7 +409,7 @@ fn mi_heap_absorb(heap: *mi_heap_t, from: *mi_heap_t) void {
     // note: be careful here as the `heap` field in all those pages no longer point to `from`,
     // turns out to be ok as `_mi_heap_delayed_free` only visits the list and calls a
     // the regular `_mi_free_delayed_block` which is safe.
-    //TODO: mi._mi_heap_delayed_free_all(from) from page.zig
+    _mi_heap_delayed_free_all(from);
     assert(from.thread_delayed_free.load(AtomicOrder.Acquire) == null);
 
     // and reset the `from` heap
