@@ -235,7 +235,7 @@ pub fn _mi_page_malloc(heap: *mi_heap_t, page: *mi_page_t, size: usize, zero: bo
             mi_assert_internal(delta >= 0 and mi_page_usable_block_size(page) >= (size - MI_PADDING_SIZE + delta));
             mi_track_mem_defined(@ptrCast(*u8, padding), @sizeOf(mi_padding_t)); // note: re-enable since mi_page_usable_block_size may set noaccess
         }
-        padding.canary = @intCast(u32, mi_ptr_encode(page, block, &page.keys));
+        padding.canary = @truncate(u32, mi_ptr_encode(page, block, &page.keys));
         padding.delta = @intCast(u32, delta);
         const fill = @ptrCast([*]u8, padding) - delta;
         const maxpad = if (delta > MI_MAX_ALIGN_SIZE) MI_MAX_ALIGN_SIZE else delta; // set at most N initial padding bytes
@@ -373,7 +373,7 @@ fn mi_page_decode_padding(page: *const mi_page_t, block: *const mi_block_t, delt
     mi_track_mem_defined(padding, @sizeOf(mi_padding_t));
     delta.* = padding.delta;
     const canary = padding.canary;
-    const ok = (mi_ptr_encode(page, block, &page.keys) == canary and delta.* <= bsize.*);
+    const ok = (@truncate(u32, mi_ptr_encode(page, block, &page.keys)) == canary and delta.* <= bsize.*);
     mi_track_mem_noaccess(padding, @sizeOf(mi_padding_t));
     return ok;
 }
