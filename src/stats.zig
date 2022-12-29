@@ -156,7 +156,7 @@ fn mi_stats_add(stats: *mi_stats_t, src: *const mi_stats_t) void {
 //  Display statistics
 //-----------------------------------------------------------
 
-const mi_print = std.log.info;
+const mi_print = std.debug.print;
 
 // unit > 0 : size in binary bytes
 // unit == 0: count as decimal
@@ -165,8 +165,8 @@ fn mi_printf_amount(n_in: i64, unit: i64, out: ?mi_output_fun, arg: ?*anyopaque,
     var n = n_in;
     _ = out;
     _ = arg;
-    var buf: [32]u8 = undefined;
-    buf[0] = 0;
+    var bufArr: [32]u8 = undefined;
+    var buf: []u8 = bufArr[0..0];
     const suffix = if (unit <= 0) " " else "B";
     const base: i64 = if (unit == 0) 1000 else 1024;
     if (unit > 0) n *= unit;
@@ -174,7 +174,7 @@ fn mi_printf_amount(n_in: i64, unit: i64, out: ?mi_output_fun, arg: ?*anyopaque,
     const pos = if (n < 0) -n else n;
     if (pos < base) {
         if (n != 1 or suffix[0] != 'B') { // skip printing 1 B for the unit column
-            _ = fmt.bufPrint(&buf, "{} {s:<3}", .{ n, if (n == 0) "" else suffix }) catch return;
+            buf = fmt.bufPrint(&bufArr, "{} {s:<3}", .{ n, if (n == 0) "" else suffix }) catch return;
         }
     } else {
         var divider = base;
@@ -190,9 +190,9 @@ fn mi_printf_amount(n_in: i64, unit: i64, out: ?mi_output_fun, arg: ?*anyopaque,
         const tens = @divTrunc(n, @divTrunc(divider, 10));
         const whole = @divTrunc(tens, 10);
         const frac1 = @mod(tens, 10);
-        var unitdesc: [8]u8 = undefined;
-        _ = fmt.bufPrint(&unitdesc, "{s}{s}{s}", .{ magnitude, if (base == 1024) "i" else "", suffix }) catch return;
-        _ = fmt.bufPrint(&buf, "{}.{} {s:<3}", .{ whole, if (frac1 < 0) -frac1 else frac1, unitdesc }) catch return;
+        var unitdescArr: [8]u8 = undefined;
+        const unitdesc = fmt.bufPrint(&unitdescArr, "{s}{s}{s}", .{ magnitude, if (base == 1024) "i" else "", suffix }) catch return;
+        buf = fmt.bufPrint(&bufArr, "{}.{} {s:<3}", .{ whole, if (frac1 < 0) -frac1 else frac1, unitdesc }) catch return;
     }
     _ = format;
     // TODO: Don't know how to deal with non-comptime format in zig
@@ -268,7 +268,7 @@ fn mi_stat_counter_print_avg(stat: *const mi_stat_counter_t, msg: []const u8, ou
 fn mi_print_header(out: ?mi_output_fun, arg: ?*anyopaque) void {
     _ = out;
     _ = arg;
-    mi_print("{s:10} {s:10} {s:10} {s:10} {s:10} {s:10} {s:10}", //
+    mi_print("{s:10} {s:10} {s:10} {s:10} {s:10} {s:10} {s:10}\n", //
         .{ "heap stats", "peak   ", "total   ", "freed   ", "current   ", "unit   ", "count   " });
 }
 
@@ -282,8 +282,8 @@ fn mi_stats_print_bins(bins: [*]const mi_stat_count_t, max: usize, format: []con
         if (bins[i].allocated > 0) {
             found = true;
             const unit = _mi_bin_size(@intCast(u8, i));
-            _ = fmt.bufPrint(&buf, "{s} {:3}", .{ format, i }) catch return;
-            mi_stat_print(&bins[i], &buf, @intCast(i64, unit), out, arg);
+            const bufOut = fmt.bufPrint(&buf, "{s} {:3}", .{ format, i }) catch return;
+            mi_stat_print(&bins[i], bufOut, @intCast(i64, unit), out, arg);
         }
     }
     if (found) {
