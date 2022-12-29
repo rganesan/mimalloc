@@ -237,7 +237,7 @@ pub inline fn _mi_segment_page_of(segment: *const mi_segment_t, p: anytype) *mi_
     var slice0 = &segment.slices[idx];
     var slice = mi_slice_first(slice0); // adjust to the block that holds the page data
     mi_assert_internal(slice.slice_offset == 0);
-    mi_assert_internal(@ptrToInt(slice) >= @ptrToInt(&segment.slices) and @ptrToInt(slice) < @ptrToInt(&segment.slices[segment.slice_entries]));
+    mi_assert_internal(@ptrToInt(slice) >= @ptrToInt(&segment.slices) and @ptrToInt(slice) < @ptrToInt(@ptrCast([*]const mi_slice_t, &segment.slices) + segment.slice_entries));
     return mi_slice_to_page(slice);
 }
 
@@ -419,7 +419,7 @@ fn mi_segment_slices_end(segment: *const mi_segment_t) *const mi_slice_t {
 fn mi_slice_start(slice: *const mi_slice_t) [*]u8 {
     const segment = _mi_ptr_segment(slice);
     mi_assert_internal(@ptrToInt(slice) >= @ptrToInt(&segment.slices) and @ptrToInt(slice) < @ptrToInt(mi_segment_slices_end(segment)));
-    return @ptrCast([*]u8, segment) + (@ptrToInt(slice) - @ptrToInt(&segment.slices)) * MI_SEGMENT_SLICE_SIZE;
+    return @ptrCast([*]u8, segment) + ((@ptrToInt(slice) - @ptrToInt(&segment.slices)) / @sizeOf(mi_slice_t)) * MI_SEGMENT_SLICE_SIZE;
 }
 
 //-----------------------------------------------------------
@@ -449,7 +449,7 @@ fn mi_slice_bin(slice_count: usize) usize {
 
 fn mi_slice_index(slice: *const mi_slice_t) usize {
     const segment = _mi_ptr_segment(slice);
-    const index = @ptrToInt(slice) - @ptrToInt(&segment.slices);
+    const index = (@ptrToInt(slice) - @ptrToInt(&segment.slices)) / @sizeOf(mi_slice_t);
     mi_assert_internal(index >= 0 and index < segment.slice_entries);
     return index;
 }
@@ -565,7 +565,7 @@ fn mi_segment_info_size(segment: *mi_segment_t) usize {
 }
 
 fn _mi_segment_page_start_from_slice(segment: *const mi_segment_t, slice: *const mi_slice_t, xblock_size: usize, page_size: ?*usize) [*]u8 {
-    const idx = @ptrToInt(slice) - @ptrToInt(&segment.slices);
+    const idx = (@ptrToInt(slice) - @ptrToInt(&segment.slices)) / @sizeOf(mi_slice_t);
     const psize = slice.slice_count * MI_SEGMENT_SLICE_SIZE;
     // make the start not OS page aligned for smaller blocks to avoid page/cache effects
     const start_offset: usize = if (xblock_size >= MI_INTPTR_SIZE and xblock_size <= 1024) MI_MAX_ALIGN_GUARANTEE else 0;
