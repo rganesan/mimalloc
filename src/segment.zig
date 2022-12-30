@@ -500,9 +500,9 @@ fn mi_slice_is_used(slice: *const mi_slice_t) bool {
 
 fn mi_span_queue_contains(sq: *const mi_span_queue_t, slice: *const mi_slice_t) bool {
     if (MI_DEBUG < 3) return;
-    var s: ?*const mi_span_queue_t = sq.first;
-    while (s != null) : (s = s.next) {
-        if (s == slice) return true;
+    var s: ?*const mi_slice_t = sq.first;
+    while (s != null) : (s = s.?.next) {
+        if (s.? == slice) return true;
     }
     return false;
 }
@@ -511,13 +511,13 @@ fn mi_segment_is_valid(segment: *mi_segment_t, tld: *mi_segments_tld_t) bool {
     if (MI_DEBUG < 3) return true;
     mi_assert_internal(_mi_ptr_cookie(segment) == segment.cookie);
     mi_assert_internal(segment.abandoned <= segment.used);
-    mi_assert_internal(segment.thread_id == 0 or segment.thread_id == _mi_thread_id());
+    mi_assert_internal(segment.thread_id.load(AtomicOrder.Monotonic) == 0 or segment.thread_id.load(AtomicOrder.Monotonic) == _mi_thread_id());
     mi_assert_internal(mi_commit_mask_all_set(&segment.commit_mask, &segment.decommit_mask)); // can only decommit committed blocks
     //mi_assert_internal(segment.segment_info_size % MI_SEGMENT_SLICE_SIZE == 0);
     var slice = &segment.slices[0];
     const end = mi_segment_slices_end(segment);
     var used_count: usize = 0;
-    while (slice < end) {
+    while (@ptrToInt(slice) < @ptrToInt(end)) {
         mi_assert_internal(slice.slice_count > 0);
         mi_assert_internal(slice.slice_offset == 0);
         const index = mi_slice_index(slice);
@@ -531,8 +531,8 @@ fn mi_segment_is_valid(segment: *mi_segment_t, tld: *mi_segments_tld_t) bool {
                 mi_assert_internal(i == 0 or segment.slices[index + i].xblock_size == 1);
             }
             // and the last entry as well (for coalescing)
-            const last = slice + slice.slice_count - 1;
-            if (last > slice and last < mi_segment_slices_end(segment)) {
+            const last = @ptrCast(*mi_slice_t, @ptrCast([*]mi_slice_t, slice) + slice.slice_count - 1);
+            if (@ptrToInt(last) > @ptrToInt(slice) and @ptrToInt(last) < @ptrToInt(mi_segment_slices_end(segment))) {
                 mi_assert_internal(last.slice_offset == (slice.slice_count - 1) * @sizeOf(mi_slice_t));
                 mi_assert_internal(last.slice_count == 0);
                 mi_assert_internal(last.xblock_size == 1);
@@ -540,16 +540,16 @@ fn mi_segment_is_valid(segment: *mi_segment_t, tld: *mi_segments_tld_t) bool {
         } else { // free range of slices; only last slice needs a valid back offset
             const last = &segment.slices[maxindex];
             if (segment.kind != .MI_SEGMENT_HUGE or slice.slice_count <= (segment.slice_entries - segment.segment_info_slices)) {
-                mi_assert_internal(slice == last - last.slice_offset);
+                mi_assert_internal(@ptrToInt(slice) == @ptrToInt(last) - last.slice_offset);
             }
             mi_assert_internal(slice == last or last.slice_count == 0);
             mi_assert_internal(last.xblock_size == 0 or (segment.kind == .MI_SEGMENT_HUGE and last.xblock_size == 1));
-            if (segment.kind != .MI_SEGMENT_HUGE and segment.thread_id != 0) { // segment is not huge or abandoned
+            if (segment.kind != .MI_SEGMENT_HUGE and segment.thread_id.load(AtomicOrder.Monotonic) != 0) { // segment is not huge or abandoned
                 const sq = mi_span_queue_for(slice.slice_count, tld);
                 mi_assert_internal(mi_span_queue_contains(sq, slice));
             }
         }
-        slice = &segment.slices[maxindex + 1];
+        slice = @ptrCast(*mi_slice_t, @ptrCast([*]mi_slice_t, slice) + slice.slice_count);
     }
     mi_assert_internal(slice == end);
     mi_assert_internal(used_count == segment.used + 1);

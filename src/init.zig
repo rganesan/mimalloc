@@ -174,7 +174,7 @@ pub var _mi_heap_main = mi_heap_t{
     .random = undefined, // TODO
 };
 
-var _mi_process_is_initialized = false; // set to `true` in `process_init`.
+pub var _mi_process_is_initialized = false; // set to `true` in `process_init`.
 
 pub var _mi_stats_main = mi_stats_t{};
 

@@ -98,6 +98,12 @@ pub inline fn _mi_heap_get_free_small_page(heap: *mi_heap_t, size: usize) *mi_pa
     return heap.pages_free_direct[idx];
 }
 
+const mi_block_visit_arg = *opaque {};
+const mi_block_visit_fun = *const fn (heap: *const mi_heap_t, area: *const mi_heap_area_t, block: *anyopaque, block_size: usize, arg: ?mi_block_visit_arg) bool;
+
+const mi_heap_area_visit_arg = *opaque {};
+const mi_heap_area_visit_fun = *const fn (heap: *const mi_heap_t, area: *const mi_heap_area_ex_t, arg: ?mi_heap_area_visit_arg) bool;
+
 //- -----------------------------------------------------------
 //  Helpers
 //-------------------------------------------------------------
@@ -466,19 +472,19 @@ fn mi_heap_set_default(heap: *mi_heap_t) *mi_heap_t {
 //-----------------------------------------------------------
 
 // private since it is not thread safe to access heaps from other threads.
-fn mi_heap_of_block(p: *opaque {}) *mi_heap_t {
+fn mi_heap_of_block(p: *anyopaque) *mi_heap_t {
     const segment = mi._mi_ptr_segment(p);
     const valid = (mi._mi_ptr_cookie(segment) == segment.cookie);
     mi_assert_internal(valid);
     return mi.mi_page_heap(mi._mi_segment_page_of(segment, p));
 }
 
-pub fn mi_heap_contains_block(heap: *mi_heap_t, p: *opaque {}) bool {
+pub fn mi_heap_contains_block(heap: *mi_heap_t, p: *anyopaque) bool {
     if (!mi.mi_heap_is_initialized(heap)) return false;
     return (heap == mi_heap_of_block(p));
 }
 
-fn mi_heap_page_check_owned(heap: *mi_heap_t, pq: *mi_page_queue_t, page: *mi_page_t, p: *opaque {}, vfound: *opaque {}) bool {
+fn mi_heap_page_check_owned(heap: *mi_heap_t, pq: *mi_page_queue_t, page: *mi_page_t, p: *anyopaque, vfound: *opaque {}) bool {
     _ = heap;
     _ = pq;
     const found = @ptrCast(*bool, vfound);
@@ -489,7 +495,7 @@ fn mi_heap_page_check_owned(heap: *mi_heap_t, pq: *mi_page_queue_t, page: *mi_pa
     return (!found.*); // continue if not found
 }
 
-pub fn mi_heap_check_owned(heap: *mi_heap_t, p: *opaque {}) bool {
+pub fn mi_heap_check_owned(heap: *mi_heap_t, p: *anyopaque) bool {
     if (!mi.mi_heap_is_initialized(heap)) return false;
     if ((@ptrToInt(p) & (mi.INTPTR_SIZE - 1)) != 0) return false; // only aligned pointers
     var found: bool = false;
@@ -507,13 +513,23 @@ fn mi_check_owned(p: *opaque {}) bool {
 //        enable visiting all blocks of all heaps across threads
 //-------------------------------------------------------------
 
+// An area of heap space contains blocks of a single size.
+const mi_heap_area_t = struct {
+    blocks: *anyopaque, // start of the area containing heap blocks
+    reserved: usize, // bytes reserved for this area (virtual)
+    committed: usize, // current available bytes for this area
+    used: usize, // number of allocated blocks
+    block_size: usize, // size in bytes of each block
+    full_block_size: usize, // size in bytes of a full block including padding and metadata.
+};
+
 // Separate struct to keep `mi_page_t` out of the public interface
 const mi_heap_area_ex_t = struct {
     area: mi.mi_heap_area_t,
     page: *mi_page_t,
 };
 
-fn mi_heap_area_visit_blocks(xarea: *const mi_heap_area_ex_t, visitor: mi.mi_block_visit_fun, arg: *opaque {}) bool {
+fn mi_heap_area_visit_blocks(xarea: *const mi_heap_area_ex_t, visitor: mi_block_visit_fun, arg: ?mi_block_visit_arg) bool {
     const area = &xarea.area;
     const page = xarea.page;
     if (page == null) return true;
@@ -571,8 +587,6 @@ fn mi_heap_area_visit_blocks(xarea: *const mi_heap_area_ex_t, visitor: mi.mi_blo
     return true;
 }
 
-const mi_heap_area_visit_fun = *const fn (heap: *const mi_heap_t, area: *const mi_heap_area_ex_t, arg: ?*opaque {}) bool;
-
 fn mi_heap_visit_areas_page(heap: *mi_heap_t, pq: *mi_page_queue_t, page: *mi_page_t, vfun: *opaque {}, arg: *opaque {}) bool {
     _ = pq;
     const fun = @ptrCast(mi_heap_area_visit_fun, vfun);
@@ -590,15 +604,15 @@ fn mi_heap_visit_areas_page(heap: *mi_heap_t, pq: *mi_page_queue_t, page: *mi_pa
 }
 
 // Visit all heap pages as areas
-fn mi_heap_visit_areas(heap: *const mi_heap_t, visitor: mi_heap_area_visit_fun, arg: ?*opaque {}) bool {
-    return mi_heap_visit_pages(heap, mi_heap_visit_areas_page, @ptrCast(*opaque {}, visitor), arg); // note: function pointer to void* :-{
+fn mi_heap_visit_areas(heap: *const mi_heap_t, visitor: mi_heap_area_visit_fun, arg: ?mi_heap_area_visit_arg) bool {
+    return mi_heap_visit_pages(heap, mi_heap_visit_areas_page, visitor, arg);
 }
 
 // Just to pass arguments
 const mi_visit_blocks_args_t = struct {
     visit_blocks: bool,
-    visitor: mi.mi_block_visit_fun,
-    arg: *opaque {},
+    visitor: mi_block_visit_fun,
+    arg: ?mi_block_visit_arg,
 };
 
 fn mi_heap_area_visitor(heap: *const mi_heap_t, xarea: *const mi_heap_area_ex_t, arg: *opaque {}) bool {
@@ -612,7 +626,7 @@ fn mi_heap_area_visitor(heap: *const mi_heap_t, xarea: *const mi_heap_area_ex_t,
 }
 
 // Visit all blocks in a heap
-fn mi_heap_visit_blocks(heap: *const mi_heap_t, visit_blocks: bool, visitor: mi.mi_block_visit_fun, arg: ?*opaque {}) bool {
+fn mi_heap_visit_blocks(heap: *const mi_heap_t, visit_blocks: bool, visitor: mi_block_visit_fun, arg: ?mi_block_visit_arg) bool {
     var args = mi.mi_visit_block_args_t{ .visit_blocks = visit_blocks, .visitor = visitor, .arg = arg };
     return mi_heap_visit_areas(heap, &mi_heap_area_visitor, &args);
 }

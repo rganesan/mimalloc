@@ -75,7 +75,6 @@ const MI_ENCODE_FREELIST = mi.MI_ENCODE_FREELIST;
 
 const mi_thread_init = mi.mi_thread_init;
 const _mi_ptr_page = mi._mi_ptr_page;
-const _mi_process_is_initialized = mi._mi_process_is_initialized;
 const mi_atomic_yield = mi.mi_atomic_yield;
 const mi_mem_is_zero = mi.mi_mem_is_zero;
 
@@ -117,6 +116,7 @@ const _mi_page_malloc = mi._mi_page_malloc;
 const mi_page_queue = mi.mi_page_queue;
 const mi_page_queue_push = mi.mi_page_queue_push;
 const mi_page_queue_remove = mi.mi_page_queue_remove;
+const mi_page_queue_contains = mi.mi_page_queue_contains;
 const mi_page_queue_enqueue_from = mi.mi_page_queue_enqueue_from;
 
 const _mi_segment_page_start = mi._mi_segment_page_start;
@@ -286,26 +286,26 @@ pub inline fn mi_block_set_next(page: *const mi_page_t, block: *mi_block_t, next
     }
 }
 
-fn mi_page_list_count(page: *mi_page_t, head: *mi_block_t) usize {
+fn mi_page_list_count(page: *mi_page_t, head: ?*mi_block_t) usize {
     if (MI_DEBUG < 3) return 0;
     var count: usize = 0;
-    var block: ?*mi_block_t = head;
-    while (block != null) : (block = mi_block_next(page, block)) {
-        mi_assert_internal(page == _mi_ptr_page(head));
+    var block = head;
+    while (block != null) : (block = mi_block_next(page, block.?)) {
+        mi_assert_internal(page == _mi_ptr_page(block.?));
         count += 1;
     }
     return count;
 }
 
-fn mi_page_list_is_valid(page: *mi_page_t, block: *mi_block_t) bool {
+fn mi_page_list_is_valid(page: *mi_page_t, block: ?*mi_block_t) bool {
     if (MI_DEBUG < 3) return true;
     var psize: usize = undefined;
     const page_area = _mi_page_start(_mi_page_segment(page), page, &psize);
-    const start = @ptrCast(*mi_block_t, page_area);
-    const end = @ptrCast(*mi_block_t, page_area + psize);
-    var p: ?*mi_block_t = block;
-    while (p != null) : (p = mi_block_next(page, p)) {
-        if (p < start or p >= end) return false;
+    const start = @ptrToInt(page_area);
+    const end = @ptrToInt(page_area + psize);
+    var p = block;
+    while (p != null) : (p = mi_block_next(page, p.?)) {
+        if (@ptrToInt(p) < start or @ptrToInt(p) >= end) return false;
     }
     return true;
 }
@@ -349,18 +349,18 @@ fn mi_page_is_valid_init(page: *mi_page_t) bool {
 pub fn _mi_page_is_valid(page: *mi_page_t) bool {
     if (MI_DEBUG < 3) return true;
     mi_assert_internal(mi_page_is_valid_init(page));
-    if (MI_SECURE) {
+    if (MI_SECURE > 0) {
         mi_assert_internal(page.keys[0] != 0);
     }
-    if (page.heap() != null) {
+    if (mi_page_heap(page) != null) {
         const segment = _mi_page_segment(page);
 
-        mi_assert_internal(!_mi_process_is_initialized or segment.thread_id == 0 or segment.thread_id == mi_page_heap(page).thread_id);
+        mi_assert_internal(!mi._mi_process_is_initialized or segment.thread_id.load(AtomicOrder.Monotonic) == 0 or segment.thread_id.load(AtomicOrder.Monotonic) == mi_page_heap(page).?.thread_id);
         if (segment.kind != .MI_SEGMENT_HUGE) {
             const pq = mi_page_queue_of(page);
-            mi_assert_internal(pq.contains(page));
+            mi_assert_internal(mi_page_queue_contains(pq, page));
             mi_assert_internal(pq.block_size == mi_page_block_size(page) or mi_page_block_size(page) > MI_MEDIUM_OBJ_SIZE_MAX or mi_page_is_in_full(page));
-            mi_assert_internal(mi_heap_contains_queue(mi_page_heap(page), pq));
+            mi_assert_internal(mi_heap_contains_queue(mi_page_heap(page).?, pq));
         }
     }
     return true;

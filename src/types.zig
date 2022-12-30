@@ -76,7 +76,7 @@ pub const MI_SECURE = 0;
 // MI_DEBUG = 1  // basic assertion checks and statistics, check double free, corrupted free list, and invalid pointer free.
 // MI_DEBUG = 2  // + internal assertion checks
 // MI_DEBUG = 3  // + extensive internal invariant checking (cmake -DDEBUG_FULL=ON)
-pub const MI_DEBUG = 2;
+pub const MI_DEBUG = 3;
 
 // Reserve extra padding at the end of each block to be more resilient against heap block overflows.
 // The padding can detect byte-precise buffer overflow on free.
