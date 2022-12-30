@@ -48,10 +48,12 @@ const mi_get_default_heap = mi.mi_get_default_heap;
 const mi_count_size_overflow = mi.mi_count_size_overflow;
 const _mi_heap_realloc_zero = mi._mi_heap_realloc_zero;
 const _mi_heap_malloc_zero = mi._mi_heap_malloc_zero;
+const _mi_heap_malloc_zero_ex = mi._mi_heap_malloc_zero_ex;
 const _mi_heap_get_free_small_page = mi._mi_heap_get_free_small_page;
 const mi_usable_size = mi.mi_usable_size;
 const mi_heap_malloc_small = mi.mi_heap_malloc_small;
 const mi_page_set_has_aligned = mi.mi_page_set_has_aligned;
+const mi_page_usable_block_size = mi.mi_page_usable_block_size;
 const _mi_ptr_page = mi._mi_ptr_page;
 const _mi_ptr_segment = mi._mi_ptr_segment;
 const _mi_page_ptr_unalign = mi._mi_page_ptr_unalign;
@@ -65,6 +67,7 @@ const mi_free = mi.mi_free;
 
 const mi_track_malloc = mi.mi_track_malloc;
 const mi_track_free = mi.mi_track_free;
+const mi_track_free_size = mi.mi_track_free_size;
 const mi_track_resize = mi.mi_track_resize;
 
 // local inlines
@@ -91,7 +94,7 @@ inline fn _mi_is_power_of_two(x: usize) bool {
 // Fallback primitive aligned allocation -- split out for better codegen
 fn mi_heap_malloc_zero_aligned_at_fallback(heap: *mi_heap_t, size: usize, alignment: usize, offset: usize, zero: bool) ?*u8 {
     mi_assert_internal(size <= PTRDIFF_MAX);
-    mi_assert_internal(alignment != 0 and _mi_is_power_of_two(alignment) and alignment <= MI_ALIGNMENT_MAX);
+    mi_assert_internal(alignment != 0 and _mi_is_power_of_two(alignment));
 
     const align_mask = alignment - 1; // for any x, `(x & align_mask) == (x % alignment)`
     const padsize = size + MI_PADDING_SIZE;
@@ -103,22 +106,55 @@ fn mi_heap_malloc_zero_aligned_at_fallback(heap: *mi_heap_t, size: usize, alignm
         return p;
     }
 
-    // otherwise over-allocate
-    const oversize = size + alignment - 1;
-    const p = _mi_heap_malloc_zero(heap, oversize, zero);
-    if (p == null) return null;
+    var p: *u8 = undefined;
+    var oversize: usize = undefined;
+
+    if (mi_unlikely(alignment > MI_ALIGNMENT_MAX)) {
+        // use OS allocation for very large alignment and allocate inside a huge page (dedicated segment with 1 page)
+        // This can support alignments >= MI_SEGMENT_SIZE by ensuring the object can be aligned at a point in the
+        // first (and single) page such that the segment info is `MI_SEGMENT_SIZE` bytes before it (so it can be found by aligning the pointer down)
+        if (mi_unlikely(offset != 0)) {
+            // todo: cannot support offset alignment for very large alignments yet
+            if (MI_DEBUG > 0)
+                std.log.warn("aligned allocation with a very large alignment cannot be used with an alignment offset (size {}, alignment {}, offset {})\n", .{ size, alignment, offset });
+            return null;
+        }
+        oversize = if (size <= MI_SMALL_SIZE_MAX) MI_SMALL_SIZE_MAX + 1 // ensure we use generic malloc path
+        else size;
+        p = _mi_heap_malloc_zero_ex(heap, oversize, false, alignment) orelse return null; // the page block size should be large enough to align in the single huge page block
+        // zero afterwards as only the area from the aligned_p may be committed!
+    } else {
+        // otherwise over-allocate
+        oversize = size + alignment - 1;
+        p = _mi_heap_malloc_zero(heap, oversize, zero) orelse return null;
+    }
 
     // .. and align within the allocation
-    const adjust = alignment - ((@ptrToInt(p) + offset) & align_mask);
-    mi_assert_internal(adjust <= alignment);
-    const aligned_p = if (adjust == alignment) p else @intToPtr(*u8, @ptrToInt(p) + adjust);
-    if (aligned_p != p) mi_page_set_has_aligned(_mi_ptr_page(p.?), true);
+    const poffset = ((@ptrToInt(p) + offset) & align_mask);
+    const adjust = if (poffset == 0) 0 else alignment - poffset;
+    mi_assert_internal(adjust < alignment);
+    const aligned_p = @intToPtr(*u8, @ptrToInt(p) + adjust);
+    if (aligned_p != p) {
+        mi_page_set_has_aligned(_mi_ptr_page(p), true);
+    }
+
+    mi_assert_internal(mi_page_usable_block_size(_mi_ptr_page(p)) >= adjust + size);
+    mi_assert_internal(p == @ptrCast(*u8, _mi_page_ptr_unalign(_mi_ptr_segment(aligned_p), _mi_ptr_page(aligned_p), aligned_p)));
     mi_assert_internal((@ptrToInt(aligned_p) + offset) % alignment == 0);
-    mi_assert_internal(p.? == @ptrCast(*u8, _mi_page_ptr_unalign(_mi_ptr_segment(aligned_p.?), _mi_ptr_page(aligned_p.?), aligned_p.?)));
+    mi_assert_internal(mi_page_usable_block_size(_mi_ptr_page(p)) >= adjust + size);
+
+    // now zero the block if needed
+    if (zero and alignment > MI_ALIGNMENT_MAX) {
+        const diff = @ptrToInt(aligned_p) - @ptrToInt(p);
+        const zsize = mi_page_usable_block_size(_mi_ptr_page(p)) - diff - MI_PADDING_SIZE;
+        if (zsize > 0) {
+            @memset(@ptrCast([*]u8, aligned_p), 0, zsize);
+        }
+    }
 
     if (MI_TRACK_ENABLED) {
         if (p != aligned_p) {
-            mi_track_free(p);
+            mi_track_free_size(p, oversize);
             mi_track_malloc(aligned_p, size, zero);
         } else {
             mi_track_resize(aligned_p, oversize, size);
@@ -136,11 +172,6 @@ fn mi_heap_malloc_zero_aligned_at(heap: *mi_heap_t, size: usize, alignment: usiz
             std.log.err("aligned allocation requires the alignment to be a power-of-two (size {}, alignment {})", .{ size, alignment });
         return null;
     }
-    if (mi_unlikely(alignment > MI_ALIGNMENT_MAX)) { // we cannot align at a boundary larger than this (or otherwise we cannot find segment headers)
-        if (MI_DEBUG > 0)
-            std.log.err("aligned allocation has a maximum alignment of {} (size {}, alignment {})", .{ MI_ALIGNMENT_MAX, size, alignment });
-        return null;
-    }
     if (mi_unlikely(size > PTRDIFF_MAX)) { // we don't allocate more than PTRDIFF_MAX (see <https://sourceware.org/ml/libc-announce/2019/msg00001.html>)
         if (MI_DEBUG > 0)
             std.log.err("aligned allocation request is too large (size {}, alignment {})\n", .{ size, alignment });
@@ -151,7 +182,7 @@ fn mi_heap_malloc_zero_aligned_at(heap: *mi_heap_t, size: usize, alignment: usiz
     const padsize = size + MI_PADDING_SIZE; // note: cannot overflow due to earlier size > PTRDIFF_MAX check
 
     // try first if there happens to be a small block available with just the right alignment
-    if (mi_likely(padsize <= MI_SMALL_SIZE_MAX)) {
+    if (mi_likely(padsize <= MI_SMALL_SIZE_MAX) and alignment <= padsize) {
         const page = _mi_heap_get_free_small_page(heap, padsize);
         const is_aligned = ((@ptrToInt(page.free) + offset) & align_mask) == 0;
         if (mi_likely(page.free != null and is_aligned)) {

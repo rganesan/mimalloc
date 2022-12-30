@@ -13,6 +13,7 @@ const AtomicOrder = std.builtin.AtomicOrder;
 
 const mi = struct {
     usingnamespace @import("options.zig");
+    usingnamespace @import("alloc.zig");
     usingnamespace @import("init.zig");
     usingnamespace @import("types.zig");
     usingnamespace @import("heap.zig");
@@ -55,6 +56,7 @@ const mi_delayed_t = mi.mi_delayed_t;
 // #defines
 const MI_DEBUG = mi.MI_DEBUG;
 const MI_SECURE = mi.MI_SECURE;
+const MI_HUGE_PAGE_ABANDON = mi.MI_HUGE_PAGE_ABANDON;
 const MI_INTPTR_SIZE = mi.MI_INTPTR_SIZE;
 const MI_COMMIT_SIZE = mi.MI_COMMIT_SIZE;
 const MI_MINIMAL_COMMIT_SIZE = mi.MI_MINIMAL_COMMIT_SIZE;
@@ -151,8 +153,7 @@ const _mi_segment_map_allocated_at = mi._mi_segment_map_allocated_at;
 
 const mi_track_mem_undefined = mi.mi_track_mem_undefined;
 
-// globals
-const _mi_stats_main = mi._mi_stats_main;
+const mi_usable_size = mi.mi_usable_size;
 
 // size of a segment
 inline fn mi_segment_size(segment: *const mi_segment_t) usize {
@@ -646,7 +647,7 @@ fn mi_segment_os_free(segment: *mi_segment_t, tld: *mi_segments_tld_t) void {
             _mi_stat_decrease(&mi._mi_stats_main.committed, csize);
         _mi_abandoned_await_readers(); // wait until safe to free
         // pretend not committed to not double count decommits
-        _mi_arena_free(segment, mi_segment_size(segment), segment.memid, segment.mem_is_pinned, tld.os.?);
+        _mi_arena_free(segment, mi_segment_size(segment), segment.mem_alignment, segment.mem_align_offset, segment.memid, segment.mem_is_pinned, tld.os.?);
     }
 }
 
@@ -657,7 +658,7 @@ pub fn _mi_segment_thread_collect(tld: *mi_segments_tld_t) void {
 }
 
 //-----------------------------------------------------------
-//   Span management
+//  Commit/Decommit ranges
 //-----------------------------------------------------------
 
 fn mi_segment_commit_mask(segment: *mi_segment_t, conservative: bool, p: [*]u8, size: usize, start_p: *[*]u8, full_size: *usize, cm: *mi_commit_mask_t) void {
@@ -817,6 +818,10 @@ fn mi_segment_delayed_decommit(segment: *mi_segment_t, force: bool, stats: *mi_s
     mi_assert_internal(mi_commit_mask_is_empty(&segment.decommit_mask));
 }
 
+//--------------------------------------------------------------
+//  Span free
+//--------------------------------------------------------------
+
 fn mi_segment_is_abandoned(segment: *mi_segment_t) bool {
     return (segment.thread_id.load(AtomicOrder.Unordered) == 0);
 }
@@ -905,17 +910,9 @@ fn mi_segment_span_free_coalesce(slice: *mi_slice_t, tld: *mi_segments_tld_t) *m
     return new_slice;
 }
 
-fn mi_segment_slice_split(segment: *mi_segment_t, slice: *mi_slice_t, slice_count: usize, tld: *mi_segments_tld_t) void {
-    mi_assert_internal(_mi_ptr_segment(slice) == segment);
-    mi_assert_internal(slice.slice_count >= slice_count);
-    mi_assert_internal(slice.xblock_size > 0); // no more in free queue
-    if (slice.slice_count <= slice_count) return;
-    mi_assert_internal(segment.kind != .MI_SEGMENT_HUGE);
-    const next_index = mi_slice_index(slice) + slice_count;
-    const next_count = slice.slice_count - slice_count;
-    mi_segment_span_free(segment, next_index, next_count, tld);
-    slice.slice_count = @intCast(u32, slice_count);
-}
+//-----------------------------------------------------------
+//  Page allocation
+//-----------------------------------------------------------
 
 // Note: may still return null if committing the memory failed
 fn mi_segment_span_allocate(segment: *mi_segment_t, slice_index: usize, slice_count: usize, tld: *mi_segments_tld_t) ?*mi_page_t {
@@ -965,6 +962,18 @@ fn mi_segment_span_allocate(segment: *mi_segment_t, slice_index: usize, slice_co
     page.b.is_committed = true;
     segment.used += 1;
     return page;
+}
+
+fn mi_segment_slice_split(segment: *mi_segment_t, slice: *mi_slice_t, slice_count: usize, tld: *mi_segments_tld_t) void {
+    mi_assert_internal(_mi_ptr_segment(slice) == segment);
+    mi_assert_internal(slice.slice_count >= slice_count);
+    mi_assert_internal(slice.xblock_size > 0); // no more in free queue
+    if (slice.slice_count <= slice_count) return;
+    mi_assert_internal(segment.kind != .MI_SEGMENT_HUGE);
+    const next_index = mi_slice_index(slice) + slice_count;
+    const next_count = slice.slice_count - slice_count;
+    mi_segment_span_free(segment, next_index, next_count, tld);
+    slice.slice_count = @intCast(u32, slice_count);
 }
 
 fn mi_segments_page_find_and_allocate(slice_count_in: usize, req_arena_id: mi_arena_id_t, tld: *mi_segments_tld_t) ?*mi_page_t {
@@ -1718,6 +1727,7 @@ fn mi_segment_huge_page_alloc(size: usize, req_arena_id: mi_arena_id_t, tld: *mi
 
 // free huge block from another thread
 pub fn _mi_segment_huge_page_free(segment: *mi_segment_t, page: *mi_page_t, block: *mi_block_t) void {
+    if (!MI_HUGE_PAGE_ABANDON) return;
     // huge page segments are always abandoned and can be freed immediately by any thread
     mi_assert_internal(segment.kind == .MI_SEGMENT_HUGE);
     mi_assert_internal(segment == _mi_page_segment(page));
@@ -1737,6 +1747,20 @@ pub fn _mi_segment_huge_page_free(segment: *mi_segment_t, page: *mi_page_t, bloc
         _mi_segment_page_free(page, true, &tld.segments);
     } else if (MI_DEBUG != 0) {
         mi_assert_internal(false);
+    }
+}
+
+// reset memory of a huge block from another thread
+pub fn _mi_segment_huge_page_reset(segment: *mi_segment_t, page: *mi_page_t, block: *mi_block_t) void {
+    if (MI_HUGE_PAGE_ABANDON) return;
+    mi_assert_internal(segment.kind == .MI_SEGMENT_HUGE);
+    mi_assert_internal(segment == _mi_page_segment(page));
+    mi_assert_internal(page.used == 1); // this is called just before the free
+    mi_assert_internal(page.free == null);
+    if (segment.allow_decommit) {
+        const csize = mi_usable_size(block) - @sizeOf(mi_block_t);
+        const p = @ptrCast([*]u8, block) + @sizeOf(mi_block_t);
+        _ = _mi_os_decommit(p, csize, &mi._mi_stats_main); // note: cannot use segment_decommit on huge segments
     }
 }
 

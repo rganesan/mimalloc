@@ -49,8 +49,6 @@ pub const MI_ARENA_ID_NONE = 0;
 // Note that `alignment` always follows `size` for consistency with unaligned
 // allocation, but unfortunately this differs from `posix_memalign` and `aligned_alloc`.
 // -------------------------------------------------------------------------------------
-// maximum supported alignment is 16MiB (1MB for 32-bit)
-pub const MI_ALIGNMENT_MAX = if (@sizeOf(usize) > @sizeOf(u32)) 16 * 1024 * 1024 else 1024 * 1024;
 
 // Minimal alignment necessary. On most platforms 16 bytes are needed
 // due to SSE registers for example. This must be at least `sizeof(void*)`
@@ -85,6 +83,12 @@ pub const MI_PADDING = if (MI_DEBUG >= 1 or MI_VALGRIND) 1 else 0;
 // Encoded free lists allow detection of corrupted free lists
 // and can detect buffer overflows, modify after free, and double `free`s.
 pub const MI_ENCODE_FREELIST = (MI_SECURE >= 3 or MI_DEBUG >= 1);
+
+// We used to abandon huge pages but to eagerly deallocate if freed from another thread,
+// but that makes it not possible to visit them during a heap walk or include them in a
+// `mi_heap_destroy`. We therefore instead reset/decommit the huge blocks if freed from
+// another thread so most memory is available until it gets properly freed by the owning thread.
+pub const MI_HUGE_PAGE_ABANDON = false;
 
 // ------------------------------------------------------
 // Platform specific values
@@ -125,7 +129,7 @@ pub const MI_GiB = MI_MiB * MI_KiB;
 // Main tuning parameters for segment and page sizes
 // Sizes for 64-bit (usually divide by two for 32-bit)
 pub const MI_SEGMENT_SLICE_SHIFT = 13 + MI_INTPTR_SHIFT; // 64KiB  (32KiB on 32-bit)
-pub const MI_SEGMENT_SHIFT = MI_SEGMENT_SLICE_SHIFT + if (MI_INTPTR_SIZE > 4) 10 else 7; // 64MiB  (4MiB on 32-bit)
+pub const MI_SEGMENT_SHIFT = MI_SEGMENT_SLICE_SHIFT + if (MI_INTPTR_SIZE > 4) 9 else 7; // 32MiB  (4MiB on 32-bit)
 
 pub const MI_SMALL_PAGE_SHIFT = MI_SEGMENT_SLICE_SHIFT; // 64KiB
 pub const MI_MEDIUM_PAGE_SHIFT = 3 + MI_SMALL_PAGE_SHIFT; // 512KiB
@@ -133,7 +137,7 @@ pub const MI_MEDIUM_PAGE_SHIFT = 3 + MI_SMALL_PAGE_SHIFT; // 512KiB
 // Derived constants
 pub const MI_SEGMENT_SIZE = 1 << MI_SEGMENT_SHIFT;
 pub const MI_SEGMENT_ALIGN = MI_SEGMENT_SIZE;
-pub const MI_SEGMENT_MASK = @intCast(usize, MI_SEGMENT_SIZE - 1);
+pub const MI_SEGMENT_MASK = @intCast(usize, MI_SEGMENT_ALIGN - 1);
 pub const MI_SEGMENT_SLICE_SIZE = 1 << MI_SEGMENT_SLICE_SHIFT;
 pub const MI_SLICES_PER_SEGMENT = MI_SEGMENT_SIZE / MI_SEGMENT_SLICE_SIZE; // 1024
 
@@ -151,12 +155,6 @@ pub const MI_BIN_HUGE = 73;
 //#if (MI_MEDIUM_OBJ_WSIZE_MAX >= 655360)
 //#error "mimalloc internal: define more bins"
 //#endif
-//#if (MI_ALIGNMENT_MAX > MI_SEGMENT_SIZE/2)
-//#error "mimalloc internal: the max aligned boundary is too large for the segment size"
-//#endif
-//#if (MI_ALIGNED_MAX % MI_SEGMENT_SLICE_SIZE != 0)
-//#error "mimalloc internal: the max aligned boundary must be an integral multiple of the segment slice size"
-//#endif
 
 // Maximum slice offset (15)
 pub const MI_MAX_SLICE_OFFSET = (MI_ALIGNMENT_MAX / MI_SEGMENT_SLICE_SIZE) - 1;
@@ -166,6 +164,9 @@ pub const MI_HUGE_BLOCK_SIZE = 2 * MI_GiB;
 
 // blocks up to this size are always allocated aligned
 pub const MI_MAX_ALIGN_GUARANTEE = 8 * MI_MAX_ALIGN_SIZE;
+
+// Alignments over MI_ALIGNMENT_MAX are allocated in dedicated huge page segments
+pub const MI_ALIGNMENT_MAX = (MI_SEGMENT_SIZE >> 1);
 
 // ------------------------------------------------------
 // Mimalloc pages contain allocated blocks
@@ -259,12 +260,12 @@ pub const mi_page_t = struct {
     reserved: u16 = 0, // number of blocks reserved in memory
 
     free: ?*mi_block_t = null, // list of available free blocks (`malloc` allocates from this list)
-
-    keys: if (MI_ENCODE_FREELIST) [2]usize else u0 = if (MI_ENCODE_FREELIST) .{ 0, 0 } else 0, // two random keys to encode the free lists (see `_block_next`)
     used: u32 = 0, // number of blocks in use (including blocks in `local_free` and `thread_free`)
     xblock_size: u32 = 0, // size available in each block (always `>0`)
 
     local_free: ?*mi_block_t = null, // list of deferred free blocks by this thread (migrates to `free`)
+
+    keys: if (MI_ENCODE_FREELIST) [2]usize else u0 = if (MI_ENCODE_FREELIST) .{ 0, 0 } else 0, // two random keys to encode the free lists (see `_block_next`)
     xthread_free: Atomic(mi_thread_free_t) = Atomic(mi_thread_free_t).init(0), // list of deferred free blocks freed by other threads
     xheap: Atomic(?*mi_heap_t) = undefined,
     next: ?*mi_page_t = null, // next page owned by this thread with the same `block_size`
@@ -302,7 +303,7 @@ pub const mi_segment_kind_t = enum {
 // is still tracked in fine-grained MI_COMMIT_SIZE chunks)
 // ------------------------------------------------------
 
-pub const MI_MINIMAL_COMMIT_SIZE = 2 * MI_MiB;
+pub const MI_MINIMAL_COMMIT_SIZE = (16 * MI_SEGMENT_SLICE_SIZE); // 1MiB
 pub const MI_COMMIT_SIZE = MI_SEGMENT_SLICE_SIZE; // 64KiB
 pub const MI_COMMIT_MASK_BITS = MI_SEGMENT_SIZE / MI_COMMIT_SIZE;
 pub const MI_COMMIT_MASK_FIELD_BITS = MI_SIZE_BITS;
@@ -328,6 +329,8 @@ pub const mi_segment_t = struct {
     mem_is_large: bool, // in large/huge os pages?
     mem_is_committed: bool, // `true` if the whole segment is eagerly committed
 
+    mem_alignment: usize, // page alignment for huge pages (only used for alignment > MI_ALIGNMENT_MAX)
+    mem_align_offset: usize, // offset for huge page alignment (only used for alignment > MI_ALIGNMENT_MAX)
     allow_decommit: bool,
     decommit_expire: mi_msecs_t,
     decommit_mask: mi_commit_mask_t,
@@ -348,8 +351,8 @@ pub const mi_segment_t = struct {
 
     // layout like this to optimize access in `free`
     kind: mi_segment_kind_t,
-    thread_id: Atomic(mi_threadid_t), // unique id of the thread owning this segment
     slice_entries: usize, // entries in the `slices` array, at most `MI_SLICES_PER_SEGMENT`
+    thread_id: Atomic(mi_threadid_t), // unique id of the thread owning this segment
     slices: [MI_SLICES_PER_SEGMENT]mi_slice_t,
 };
 
@@ -693,6 +696,11 @@ pub fn mi_track_malloc(p: anytype, size: usize, zero: bool) void {
     _ = zero;
 }
 
+pub fn mi_track_free_size(p: anytype, size: usize) void {
+    _ = p;
+    _ = size;
+}
+
 pub fn mi_track_resize(p: anytype, oldsize: usize, newsize: usize) void {
     _ = p;
     _ = oldsize;
@@ -771,10 +779,12 @@ pub fn _mi_arena_alloc_aligned(size: usize, alignment: usize, commit: *bool, lar
 }
 
 // Simplified version, directly release memory to page_allocator
-pub fn _mi_arena_free(p: *anyopaque, size: usize, memid: usize, all_committed: bool, tld: *mi_os_tld_t) void {
+pub fn _mi_arena_free(p: *anyopaque, size: usize, alignment: usize, align_offset: usize, memid: usize, all_committed: bool, tld: *mi_os_tld_t) void {
     _ = memid;
     _ = all_committed;
     _ = tld;
+    _ = alignment;
+    _ = align_offset;
     return os.munmap(@ptrCast([*]u8, @alignCast(mem.page_size, p))[0..size]);
 }
 

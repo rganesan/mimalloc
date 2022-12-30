@@ -49,7 +49,7 @@ inline fn mi_unlikely(cond: bool) bool {
     return cond;
 }
 
-const MI_MALLOC_VERSION = 207; // major + 2 digits minor
+const MI_MALLOC_VERSION = 209; // major + 2 digits minor
 
 pub fn mi_version() i32 {
     return MI_MALLOC_VERSION;

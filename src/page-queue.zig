@@ -34,6 +34,8 @@ const MI_DEBUG = mi.MI_DEBUG;
 const MI_BIN_FULL = mi.MI_BIN_FULL;
 const MI_BIN_HUGE = mi.MI_BIN_HUGE;
 
+const MI_HUGE_PAGE_ABANDON = mi.MI_HUGE_PAGE_ABANDON;
+
 const MI_MEDIUM_OBJ_SIZE_MAX = mi.MI_MEDIUM_OBJ_SIZE_MAX;
 const MI_MEDIUM_OBJ_WSIZE_MAX = mi.MI_MEDIUM_OBJ_WSIZE_MAX;
 const MI_LARGE_OBJ_SIZE_MAX = mi.MI_LARGE_OBJ_SIZE_MAX;
@@ -256,7 +258,9 @@ pub fn mi_page_queue_push(heap: *mi_heap_t, pq: *mi_page_queue_t, page: *mi_page
     mi_assert_internal(mi_page_heap(page) == heap);
     mi_assert_internal(!mi_page_queue_contains(pq, page));
 
-    mi_assert_internal(_mi_page_segment(page).kind != .MI_SEGMENT_HUGE);
+    if (MI_HUGE_PAGE_ABANDON) {
+        mi_assert_internal(_mi_page_segment(page).kind != .MI_SEGMENT_HUGE);
+    }
     mi_assert_internal(page.xblock_size == pq.block_size or
         (page.xblock_size > MI_MEDIUM_OBJ_SIZE_MAX) or
         (mi_page_is_in_full(page) and mi_page_queue_is_full(pq)));

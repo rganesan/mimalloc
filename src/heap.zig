@@ -404,6 +404,20 @@ pub fn mi_heap_destroy(heap: *mi_heap_t) void {
     }
 }
 
+pub fn _mi_heap_destroy_all() void {
+    const bheap = mi_heap_get_backing();
+    var curr = bheap.tld.?.heaps;
+    while (curr != null) {
+        const next = curr.next;
+        if (curr.no_reclaim) {
+            mi_heap_destroy(curr);
+        } else {
+            _mi_heap_destroy_pages(curr);
+        }
+        curr = next;
+    }
+}
+
 //--------------------------------------------------------------
 // Safe Heap delete
 //--------------------------------------------------------------

@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const builtin = @import("builtin");
 const Atomic = std.atomic.Atomic;
 const AtomicOrder = std.builtin.AtomicOrder;
 
@@ -51,6 +52,8 @@ const MI_PADDING_SIZE = mi.MI_PADDING_SIZE;
 const MI_ENCODE_FREELIST = mi.MI_ENCODE_FREELIST;
 const MI_TRACK_ENABLED = false;
 
+const MI_HUGE_PAGE_ABANDON = mi.MI_HUGE_PAGE_ABANDON;
+
 const MI_MAX_ALIGN_SIZE = mi.MI_MAX_ALIGN_SIZE;
 const MI_INTPTR_SIZE = mi.MI_INTPTR_SIZE;
 const MI_SMALL_OBJ_SIZE_MAX = mi.MI_SMALL_OBJ_SIZE_MAX;
@@ -75,6 +78,8 @@ const mi_heap_get_default = mi.mi_heap_get_default;
 const mi_heap_is_initialized = mi.mi_heap_is_initialized;
 const mi_is_in_heap_region = mi.mi_is_in_heap_region;
 
+const mi_page_is_huge = mi.mi_page_is_huge;
+
 const mi_block_next = mi.mi_block_next;
 const mi_block_nextx = mi.mi_block_nextx;
 const mi_block_set_next = mi.mi_block_set_next;
@@ -89,6 +94,7 @@ const _mi_ptr_segment = mi._mi_ptr_segment;
 const _mi_segment_page_of = mi._mi_segment_page_of;
 const _mi_segment_page_start = mi._mi_segment_page_start;
 const _mi_segment_huge_page_free = mi._mi_segment_huge_page_free;
+const _mi_segment_huge_page_reset = mi._mi_segment_huge_page_reset;
 
 const _mi_page_segment = mi._mi_page_segment;
 const mi_page_all_free = mi.mi_page_all_free;
@@ -112,6 +118,7 @@ const mi_track_mem_defined = mi.mi_track_mem_defined;
 const mi_track_mem_undefined = mi.mi_track_mem_undefined;
 const mi_track_mem_noaccess = mi.mi_track_mem_noaccess;
 const mi_track_malloc = mi.mi_track_malloc;
+const mi_track_free_size = mi.mi_track_free_size;
 const mi_track_free = mi.mi_track_free;
 
 const _mi_memzero_aligned = mi._mi_memzero_aligned;
@@ -186,7 +193,7 @@ pub fn _mi_page_malloc(heap: *mi_heap_t, page: *mi_page_t, size: usize, zero: bo
     mi_assert_internal(page.xblock_size == 0 or mi_page_block_size(page) >= size);
     var block = page.free;
     if (mi_unlikely(block == null)) {
-        return _mi_malloc_generic(heap, size, zero);
+        return _mi_malloc_generic(heap, size, zero, 0);
     }
     mi_assert_internal(block != null and _mi_ptr_page(@ptrCast(*const u8, block.?)) == page);
     // pop from the free list
@@ -207,7 +214,7 @@ pub fn _mi_page_malloc(heap: *mi_heap_t, page: *mi_page_t, size: usize, zero: bo
     }
 
     if ((MI_DEBUG > 0) and !MI_TRACK_ENABLED) {
-        if (!page.b.is_zero and !zero) {
+        if (!page.b.is_zero and !zero and !mi_page_is_huge(page)) {
             @memset(@ptrCast([*]u8, block), MI_DEBUG_UNINIT, mi_page_usable_block_size(page));
         } else if (MI_SECURE != 0) {
             if (!zero) {
@@ -237,11 +244,13 @@ pub fn _mi_page_malloc(heap: *mi_heap_t, page: *mi_page_t, size: usize, zero: bo
         }
         padding.canary = @truncate(u32, mi_ptr_encode(page, block, &page.keys));
         padding.delta = @intCast(u32, delta);
-        const fill = @ptrCast([*]u8, padding) - delta;
-        const maxpad = if (delta > MI_MAX_ALIGN_SIZE) MI_MAX_ALIGN_SIZE else delta; // set at most N initial padding bytes
-        var i: usize = 0;
-        while (i < maxpad) : (i += 1) {
-            fill[i] = MI_DEBUG_PADDING;
+        if (!mi_page_is_huge(page)) {
+            const fill = @ptrCast([*]u8, padding) - delta;
+            const maxpad = if (delta > MI_MAX_ALIGN_SIZE) MI_MAX_ALIGN_SIZE else delta; // set at most N initial padding bytes
+            var i: usize = 0;
+            while (i < maxpad) : (i += 1) {
+                fill[i] = MI_DEBUG_PADDING;
+            }
         }
     }
 
@@ -251,7 +260,10 @@ pub fn _mi_page_malloc(heap: *mi_heap_t, page: *mi_page_t, size: usize, zero: bo
 fn mi_heap_malloc_small_zero(heap_in: *mi_heap_t, size_in: usize, zero: bool) ?*u8 {
     var size = size_in;
     var heap = heap_in;
-    mi_assert(heap.thread_id == 0 or heap.thread_id == _mi_thread_id()); // heaps are thread local
+    if (MI_DEBUG > 0) {
+        const tid = _mi_thread_id();
+        mi_assert(heap.thread_id == 0 or heap.thread_id == tid); // heaps are thread local
+    }
     mi_assert(size <= MI_SMALL_SIZE_MAX);
     if (MI_PADDING > 0 and size == 0) {
         size = @sizeOf(*u8);
@@ -279,13 +291,14 @@ pub fn mi_malloc_small(size: usize) ?*u8 {
 }
 
 // The main allocation function
-pub fn _mi_heap_malloc_zero(heap_in: *mi_heap_t, size: usize, zero: bool) ?*u8 {
+pub fn _mi_heap_malloc_zero_ex(heap_in: *mi_heap_t, size: usize, zero: bool, huge_alignment: usize) ?*u8 {
     var heap = heap_in;
     if (mi_likely(size <= MI_SMALL_SIZE_MAX)) {
+        mi_assert_internal(huge_alignment == 0);
         return mi_heap_malloc_small_zero(heap, size, zero);
     } else {
         mi_assert(heap.thread_id == 0 or heap.thread_id == _mi_thread_id()); // heaps are thread local
-        const p = _mi_malloc_generic(heap, size + MI_PADDING_SIZE, zero); // note: size can overflow but it is detected in malloc_generic
+        const p = _mi_malloc_generic(heap, size + MI_PADDING_SIZE, zero, huge_alignment); // note: size can overflow but it is detected in malloc_generic
         mi_assert_internal(p == null or mi_usable_size(p.?) >= size);
         if (MI_STAT > 1) {
             if (p != null) {
@@ -298,6 +311,10 @@ pub fn _mi_heap_malloc_zero(heap_in: *mi_heap_t, size: usize, zero: bool) ?*u8 {
         mi_track_malloc(p, size, zero);
         return p;
     }
+}
+
+pub fn _mi_heap_malloc_zero(heap: *mi_heap_t, size: usize, zero: bool) ?*u8 {
+    return _mi_heap_malloc_zero_ex(heap, size, zero, 0);
 }
 
 pub fn mi_heap_malloc(heap: *mi_heap_t, size: usize) ?*u8 {
@@ -400,18 +417,20 @@ fn mi_verify_padding(page: *const mi_page_t, block: *const mi_block_t, size: *us
     if (!ok) return false;
     mi_assert_internal(bsize >= delta);
     size.* = bsize - delta;
-    const fill = @intToPtr([*]u8, @ptrToInt(block)) + bsize - delta; // TODO: ugly const cast
-    const maxpad = if (delta > MI_MAX_ALIGN_SIZE) MI_MAX_ALIGN_SIZE else delta; // check at most the first N padding bytes
-    mi_track_mem_defined(fill, maxpad);
-    var i: usize = 0;
-    while (i < maxpad) : (i += 1) {
-        if (fill[i] != MI_DEBUG_PADDING) {
-            wrong.* = bsize - delta + i;
-            ok = false;
-            break;
+    if (!mi_page_is_huge(page)) {
+        const fill = @intToPtr([*]u8, @ptrToInt(block)) + bsize - delta; // TODO: ugly const cast
+        const maxpad = if (delta > MI_MAX_ALIGN_SIZE) MI_MAX_ALIGN_SIZE else delta; // check at most the first N padding bytes
+        mi_track_mem_defined(fill, maxpad);
+        var i: usize = 0;
+        while (i < maxpad) : (i += 1) {
+            if (fill[i] != MI_DEBUG_PADDING) {
+                wrong.* = bsize - delta + i;
+                ok = false;
+                break;
+            }
         }
+        mi_track_mem_noaccess(fill, maxpad);
     }
-    mi_track_mem_noaccess(fill, maxpad);
     return ok;
 }
 
@@ -465,7 +484,7 @@ fn mi_stat_free(page: *const mi_page_t, block: *const mi_block_t) void {
 
 // maintain stats for huge objects
 fn mi_stat_huge_free(page: *const mi_page_t) void {
-    if (MI_STAT == 0) return;
+    if (!MI_HUGE_PAGE_ABANDON or MI_STAT == 0) return;
     const heap = mi_heap_get_default();
     const bsize = mi_page_block_size(page); // to match stats in `page.c:mi_page_huge_alloc`
     if (bsize <= MI_LARGE_OBJ_SIZE_MAX) {
@@ -479,21 +498,31 @@ fn mi_stat_huge_free(page: *const mi_page_t) void {
 // Free
 // ------------------------------------------------------
 
-// multi-threaded free (or free in huge block)
+// multi-threaded free (or free in huge block if compiled with MI_HUGE_PAGE_ABANDON)
 fn _mi_free_block_mt(page: *mi_page_t, block: *mi_block_t) void {
     // The padding check may access the non-thread-owned page for the key values.
     // that is safe as these are constant and the page won't be freed (as the block is not freed yet).
     mi_check_padding(page, block);
     mi_padding_shrink(page, block, @sizeOf(mi_block_t)); // for small size, ensure we can fit the delayed thread pointers without triggering overflow detection
-    if (MI_DEBUG != 0 and !MI_TRACK_ENABLED) // note: when tracking, cannot use mi_usable_size with multi-threading
-        @memset(@ptrCast([*]u8, block), MI_DEBUG_FREED, mi_usable_size(block));
 
     // huge page segments are always abandoned and can be freed immediately
     const segment = _mi_page_segment(page);
     if (segment.kind == .MI_SEGMENT_HUGE) {
-        mi_stat_huge_free(page);
-        _mi_segment_huge_page_free(segment, page, block);
-        return;
+        if (MI_HUGE_PAGE_ABANDON) {
+            mi_stat_huge_free(page);
+            // huge page segments are always abandoned and can be freed immediately
+            _mi_segment_huge_page_free(segment, page, block);
+            return;
+        } else {
+            // huge pages are special as they occupy the entire segment
+            // as these are large we reset the memory occupied by the page so it is available to other threads
+            // (as the owning thread needs to actually free the memory later).
+            _mi_segment_huge_page_reset(segment, page, block);
+        }
+    }
+
+    if (MI_DEBUG != 0 and !MI_TRACK_ENABLED and segment.kind != .MI_SEGMENT_HUGE) { // note: when tracking, cannot use mi_usable_size with multi-threading
+        @memset(@ptrCast([*]u8, block), MI_DEBUG_FREED, mi_usable_size(block));
     }
 
     // Try to put the block on either the page-local thread free list, or the heap delayed free list.
@@ -545,8 +574,9 @@ fn _mi_free_block(page: *mi_page_t, local: bool, block: *mi_block_t) void {
         // owning thread can free a block directly
         if (mi_unlikely(mi_check_is_double_free(page, block))) return;
         mi_check_padding(page, block);
-        if (MI_DEBUG != 0 and !MI_TRACK_ENABLED)
+        if (MI_DEBUG != 0 and !MI_TRACK_ENABLED and !mi_page_is_huge(page)) { // huge page content may be already decommitted
             @memset(@ptrCast([*]u8, block), MI_DEBUG_FREED, mi_page_block_size(page));
+        }
         mi_block_set_next(page, block, page.local_free);
         page.local_free = block;
         page.used -= 1;
@@ -567,18 +597,17 @@ pub fn _mi_page_ptr_unalign(segment: *const mi_segment_t, page: *const mi_page_t
     return @intToPtr(*mi_block_t, @ptrToInt(p) - adjust);
 }
 
-fn mi_free_generic(segment: *const mi_segment_t, local: bool, p: *u8) void {
-    const page = _mi_segment_page_of(segment, p);
+pub fn _mi_free_generic(segment: *const mi_segment_t, page: *mi_page_t, is_local: bool, p: *u8) void {
     const block = if (mi_page_has_aligned(page)) _mi_page_ptr_unalign(segment, page, p) else @ptrCast(*mi_block_t, @alignCast(@alignOf(mi_block_t), p));
     mi_stat_free(page, block); // stat_free may access the padding
     mi_track_free(p);
-    _mi_free_block(page, local, block);
+    _mi_free_block(page, is_local, block);
 }
 
 // Get the segment data belonging to a pointer
 // This is just a single `and` in assembly but does further checks in debug mode
 // (and secure mode) if this was a valid pointer.
-fn mi_checked_ptr_segment(p: anytype, msg: []const u8) ?*mi_segment_t {
+fn mi_checked_ptr_segment(p: *anyopaque, msg: []const u8) ?*mi_segment_t {
     if (MI_DEBUG > 0 and mi_unlikely(@ptrToInt(p) & (MI_INTPTR_SIZE - 1) != 0)) {
         std.log.err("{s}: invalid (unaligned) pointer: {*}", .{ msg, p });
         return null;
@@ -588,9 +617,11 @@ fn mi_checked_ptr_segment(p: anytype, msg: []const u8) ?*mi_segment_t {
 
     if (MI_DEBUG > 0) {
         if (mi_unlikely(!mi_is_in_heap_region(p))) {
-            std.log.warn("{s}: pointer might not point to a valid heap region: {*} (this may still be a valid very large allocation (over 64MiB))", .{ msg, p });
-            if (mi_likely(_mi_ptr_cookie(segment) == segment.cookie)) {
-                std.log.warn("(yes, the previous pointer {*} was valid after all)", .{p});
+            if (MI_INTPTR_SIZE != 8 or builtin.os.tag != .linux or @ptrToInt(p) >> 40 != 0x7F) { // linux tends to align large blocks above 0x7F000000000 (issue #640)
+                std.log.warn("{s}: pointer might not point to a valid heap region: {*} (this may still be a valid very large allocation (over 64MiB))", .{ msg, p });
+                if (mi_likely(_mi_ptr_cookie(segment) == segment.cookie)) {
+                    std.log.warn("(yes, the previous pointer {*} was valid after all)", .{p});
+                }
             }
         }
     }
@@ -604,32 +635,34 @@ fn mi_checked_ptr_segment(p: anytype, msg: []const u8) ?*mi_segment_t {
 }
 
 // Free a block
+// fast path written carefully to prevent spilling on the stack
 pub fn mi_free(p: *u8) void {
     const segment = mi_checked_ptr_segment(p, "mi_free") orelse return;
-
-    const tid = _mi_thread_id();
+    const is_local = (_mi_thread_id() == mi_atomic_load_relaxed(&segment.thread_id));
     const page = _mi_segment_page_of(segment, p);
 
-    if (mi_likely(tid == mi_atomic_load_relaxed(&segment.thread_id) and page.flags.full_aligned == 0)) {
-        // the thread id matches and it is not a full page, nor has aligned blocks
-        // local, and not full or aligned
-        const block = @ptrCast(*mi_block_t, @alignCast(@alignOf(mi_block_t), p));
-        if (mi_unlikely(mi_check_is_double_free(page, block))) return;
-        mi_check_padding(page, block);
-        mi_stat_free(page, block);
-        if (MI_DEBUG != 0 and !MI_TRACK_ENABLED)
-            @memset(@ptrCast([*]u8, block), MI_DEBUG_FREED, mi_page_block_size(page));
-        mi_track_free(p);
-        mi_block_set_next(page, block, page.local_free);
-        page.local_free = block;
-        page.used -= 1;
-        if (mi_unlikely(page.used == 0)) { // using this expression generates better code than: page.used--; if (mi_page_all_free(page))
-            _mi_page_retire(page);
+    if (mi_likely(is_local)) { // thread-local free?
+        if (mi_likely(page.flags.full_aligned == 0)) { // and it is not a full page (full pages need to move from the full bin), nor has aligned blocks (aligned blocks need to be unaligned)
+            const block = @ptrCast(*mi_block_t, @alignCast(@alignOf(mi_block_t), p));
+            if (mi_unlikely(mi_check_is_double_free(page, block))) return;
+            mi_check_padding(page, block);
+            mi_stat_free(page, block);
+            if (MI_DEBUG != 0 and !MI_TRACK_ENABLED)
+                @memset(@ptrCast([*]u8, block), MI_DEBUG_FREED, mi_page_block_size(page));
+            mi_track_free(p);
+            mi_block_set_next(page, block, page.local_free);
+            page.local_free = block;
+            page.used -= 1;
+            if (mi_unlikely(page.used == 0)) { // using this expression generates better code than: page.used--; if (mi_page_all_free(page))
+                _mi_page_retire(page);
+            }
+        } else {
+            // page is full or contains (inner) aligned blocks; use generic path
+            _mi_free_generic(segment, page, true, p);
         }
     } else {
-        // non-local, aligned blocks, or a full page; use the more generic path
-        // note: recalc page in generic to improve code generation
-        mi_free_generic(segment, tid == segment.thread_id.load(AtomicOrder.Monotonic), p);
+        // not thread-local; use generic path
+        _mi_free_generic(segment, page, false, p);
     }
 }
 
@@ -668,9 +701,8 @@ fn mi_page_usable_aligned_size_of(segment: *mi_segment_t, page: *const mi_page_t
     return (size - adjust);
 }
 
-fn _mi_usable_size(p: anytype, msg: []const u8) usize {
+fn _mi_usable_size(p: *anyopaque, msg: []const u8) usize {
     const segment = mi_checked_ptr_segment(p, msg);
-    if (segment == null) return 0; // also returns 0 if `p == null`
     const page = _mi_segment_page_of(segment.?, p);
     if (mi_likely(!mi_page_has_aligned(page))) {
         // TODO: Try avoiding alignCast
@@ -750,7 +782,7 @@ pub fn _mi_heap_realloc_zero(heap: *mi_heap_t, p: *u8, newsize: usize, zero: boo
     const size = _mi_usable_size(p, "mi_realloc"); // also works if p == null (with size 0)
     if (mi_unlikely(newsize <= size and newsize >= (size / 2) and newsize > 0)) { // note: newsize must be > 0 or otherwise we return null for realloc(null,0)
         // todo: adjust potential padding to reflect the new size?
-        mi_track_free(p);
+        mi_track_free_size(p, size);
         mi_track_malloc(p, newsize, true);
         return p; // reallocation still fits and not more than 50% waste
     }

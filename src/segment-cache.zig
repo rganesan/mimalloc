@@ -22,6 +22,7 @@ const mi = struct {
     usingnamespace @import("segment.zig");
     usingnamespace @import("stats.zig");
     usingnamespace @import("bitmap.zig");
+    usingnamespace @import("init.zig");
 };
 
 const MI_DEBUG = mi.MI_DEBUG;
@@ -43,6 +44,7 @@ const _mi_os_numa_node = mi._mi_os_numa_node;
 
 const mi_arena_id_t = mi.mi_arena_id_t;
 const _mi_arena_memid_is_suitable = mi._mi_arena_memid_is_suitable;
+const _mi_arena_free = mi._mi_arena_free;
 
 const _mi_ptr_segment = mi._mi_ptr_segment;
 
@@ -51,8 +53,10 @@ const mi_option_get = mi.mi_option_get;
 
 const _mi_ptr_cookie = mi._mi_ptr_cookie;
 
+const _mi_arena_id_none = mi._mi_arena_id_none;
 const mi_commit_mask_is_empty = mi.mi_commit_mask_is_empty;
 const mi_commit_mask_create_empty = mi.mi_commit_mask_create_empty;
+const _mi_commit_mask_committed_size = mi._mi_commit_mask_committed_size;
 const mi_commit_mask_is_full = mi.mi_commit_mask_is_full;
 const _mi_commit_mask_next_run = mi._mi_commit_mask_next_run;
 const _mi_random_shuffle = mi._mi_random_shuffle;
@@ -76,6 +80,8 @@ const _mi_bitmap_claim = mi._mi_bitmap_claim;
 const mi_bitmap_index_create_from_bit = mi.mi_bitmap_index_create_from_bit;
 
 const _mi_abandoned_await_readers = mi._mi_abandoned_await_readers;
+
+const _mi_stat_decrease = mi._mi_stat_decrease;
 
 const mi_bsr = mi.mi_bsr;
 
@@ -137,7 +143,7 @@ fn mi_segment_cache_is_suitable(bitidx: mi_bitmap_index_t, arg: mi.PredArg) bool
     return _mi_arena_memid_is_suitable(slot.memid, req_arena_id);
 }
 
-pub fn _mi_segment_cache_pop(size: usize, commit_mask: *mi_commit_mask_t, decommit_mask: *mi_commit_mask_t, large: *bool, is_pinned: *bool, is_zero: *bool, _req_arena_id: mi_arena_id_t, memid: *usize, tld: *mi_os_tld_t) ?*mi_segment_t {
+fn mi_segment_cache_pop_ex(all_suitable: bool, size: usize, commit_mask: *mi_commit_mask_t, decommit_mask: *mi_commit_mask_t, large: *bool, is_pinned: *bool, is_zero: *bool, _req_arena_id: mi_arena_id_t, memid: *usize, tld: *mi_os_tld_t) ?*mi_segment_t {
     if (MI_CACHE_DISABLE) return null;
 
     // only segment blocks
@@ -155,7 +161,8 @@ pub fn _mi_segment_cache_pop(size: usize, commit_mask: *mi_commit_mask_t, decomm
     var bitidx: mi_bitmap_index_t = 0;
     var claimed = false;
     var req_arena_id = _req_arena_id;
-    const pred_fun = mi_segment_cache_is_suitable; // cannot pass null as the arena may be exclusive itself; todo: do not put exclusive arenas in the cache?
+    var pred_fun: ?mi.mi_bitmap_pred_fun_t = undefined;
+    if (all_suitable) pred_fun = null else pred_fun = mi_segment_cache_is_suitable; // cannot pass null as the arena may be exclusive itself; todo: do not put exclusive arenas in the cache?
     const pred_arg = @ptrCast(mi.PredArg, &req_arena_id);
 
     if (large.*) { // large allowed?
@@ -186,6 +193,10 @@ pub fn _mi_segment_cache_pop(size: usize, commit_mask: *mi_commit_mask_t, decomm
     return @ptrCast(*mi_segment_t, @alignCast(@alignOf(mi_segment_t), p));
 }
 
+pub fn _mi_segment_cache_pop(size: usize, commit_mask: *mi_commit_mask_t, decommit_mask: *mi_commit_mask_t, large: *bool, is_pinned: *bool, is_zero: *bool, _req_arena_id: mi_arena_id_t, memid: *usize, tld: *mi_os_tld_t) ?*mi_segment_t {
+    return mi_segment_cache_pop_ex(false, size, commit_mask, decommit_mask, large, is_pinned, is_zero, _req_arena_id, memid, tld);
+}
+
 fn mi_commit_mask_decommit(cmask: *mi_commit_mask_t, p: *anyopaque, total: usize, stats: *mi_stats_t) void {
     if (mi_commit_mask_is_empty(cmask)) {
         // nothing
@@ -209,16 +220,16 @@ fn mi_commit_mask_decommit(cmask: *mi_commit_mask_t, p: *anyopaque, total: usize
 
 const MI_MAX_PURGE_PER_PUSH = 4;
 
-fn mi_segment_cache_purge(force: bool, tld: *mi_os_tld_t) void {
+fn mi_segment_cache_purge(visit_all: bool, force: bool, tld: *mi_os_tld_t) void {
     if (!mi_option_is_enabled(.mi_option_allow_decommit)) return;
     const now = _mi_clock_now();
     var purged: usize = 0;
-    const max_visits: usize = if (force)
+    const max_visits: usize = if (visit_all)
         MI_CACHE_MAX // visit all
     else
         MI_CACHE_FIELDS; // probe at most N (=16) slots
 
-    var idx: usize = if (force) 0 else _mi_random_shuffle(@intCast(usize, now)) % MI_CACHE_MAX; // random start
+    var idx: usize = if (visit_all) 0 else _mi_random_shuffle(@intCast(usize, now)) % MI_CACHE_MAX; // random start
     var visited: usize = 0;
     while (visited < max_visits) : (visited += 1) { // visit N slots
         if (idx >= MI_CACHE_MAX) idx = 0; // wrap
@@ -243,14 +254,44 @@ fn mi_segment_cache_purge(force: bool, tld: *mi_os_tld_t) void {
                 }
                 _ = _mi_bitmap_unclaim(&cache_available, MI_CACHE_FIELDS, 1, bitidx); // make it available again for a pop
             }
-            if (!force and purged > MI_MAX_PURGE_PER_PUSH) break; // bound to no more than N purge tries per push
+            if (!visit_all and purged > MI_MAX_PURGE_PER_PUSH) break; // bound to no more than N purge tries per push
             idx += 1;
         }
     }
 }
 
 pub fn _mi_segment_cache_collect(force: bool, tld: *mi_os_tld_t) void {
-    mi_segment_cache_purge(force, tld);
+    if (force) {
+        // called on `mi_collect(true)` but not on thread termination
+        _mi_segment_cache_free_all(tld);
+    } else {
+        mi_segment_cache_purge(true, // visit_all
+            false, // don't force unexpired
+            tld);
+    }
+}
+
+pub fn _mi_segment_cache_free_all(tld: *mi_os_tld_t) void {
+    var commit_mask: mi_commit_mask_t = undefined;
+    var decommit_mask: mi_commit_mask_t = undefined;
+    var is_pinned: bool = undefined;
+    var is_zero: bool = undefined;
+    var memid: usize = undefined;
+    const size = MI_SEGMENT_SIZE;
+    // iterate twice: first large pages, then regular memory
+    var i: usize = 0;
+    while (i < 2) : (i += 1) {
+        while (true) {
+            // keep popping and freeing the memory
+            var large = (i == 0);
+            var p = mi_segment_cache_pop_ex(true, // all
+                size, &commit_mask, &decommit_mask, &large, &is_pinned, &is_zero, _mi_arena_id_none(), &memid, tld) orelse break;
+            const csize = _mi_commit_mask_committed_size(&commit_mask, size);
+            if (csize > 0 and !is_pinned) _mi_stat_decrease(&mi._mi_stats_main.committed, csize);
+            _mi_arena_free(p, size, MI_SEGMENT_ALIGN, 0, memid, is_pinned, // pretend not committed to not double count decommits
+                tld);
+        }
+    }
 }
 
 pub fn _mi_segment_cache_push(start: *mi_segment_t, size: usize, memid: usize, commit_mask: *const mi_commit_mask_t, decommit_mask: *const mi_commit_mask_t, is_large: bool, is_pinned: bool, tld: *mi_os_tld_t) bool {
@@ -268,7 +309,8 @@ pub fn _mi_segment_cache_push(start: *mi_segment_t, size: usize, memid: usize, c
     }
 
     // purge expired entries
-    mi_segment_cache_purge(false, // force?
+    mi_segment_cache_purge(false, // limit purges to a constan N
+        false, // don't force unexpired
         tld);
 
     // find an available slot
@@ -324,7 +366,7 @@ const MI_SEGMENT_MAP_WSIZE = (MI_SEGMENT_MAP_SIZE / MI_INTPTR_SIZE);
 var mi_segment_map = [1]Atomic(usize){Atomic(usize).init(0)} ** (MI_SEGMENT_MAP_WSIZE + 1); // 2KiB per TB with 64MiB segments
 
 fn mi_segment_map_index_of(segment: *const mi_segment_t, bitidx: *usize) usize {
-    mi_assert_internal(_mi_ptr_segment(segment) == segment); // is it aligned on MI_SEGMENT_SIZE?
+    mi_assert_internal(_mi_ptr_segment(@ptrCast([*]const mi_segment_t, segment) + 1) == segment); // is it aligned on MI_SEGMENT_SIZE?
     if (@ptrToInt(segment) >= MI_MAX_ADDRESS) {
         bitidx.* = 0;
         return MI_SEGMENT_MAP_WSIZE;
@@ -365,7 +407,7 @@ pub fn _mi_segment_map_freed_at(segment: *const mi_segment_t) void {
 // Determine the segment belonging to a pointer or null if it is not in a valid segment.
 fn _mi_segment_of(p: anytype) *?mi_segment_t {
     var segment = _mi_ptr_segment(p);
-    if (segment == null) return null;
+    mi_assert_internal(segment != null);
     var bitidx: usize = undefined;
     const index = mi_segment_map_index_of(segment, &bitidx);
     // fast path: for any pointer to valid small/medium/large object or first MI_SEGMENT_SIZE in huge
