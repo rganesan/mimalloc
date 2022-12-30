@@ -211,7 +211,7 @@ pub fn _mi_page_malloc(heap: *mi_heap_t, page: *mi_page_t, size: usize, zero: bo
             @memset(@ptrCast([*]u8, block), MI_DEBUG_UNINIT, mi_page_usable_block_size(page));
         } else if (MI_SECURE != 0) {
             if (!zero) {
-                block.next = 0;
+                block.?.next = 0;
             } // don't leak internal data
         }
     }
