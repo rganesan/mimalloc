@@ -577,7 +577,7 @@ fn mi_free_generic(segment: *const mi_segment_t, local: bool, p: *u8) void {
 // (and secure mode) if this was a valid pointer.
 fn mi_checked_ptr_segment(p: anytype, msg: []const u8) ?*mi_segment_t {
     if (MI_DEBUG > 0 and mi_unlikely(@ptrToInt(p) & (MI_INTPTR_SIZE - 1) != 0)) {
-        std.log.err("{s}: invalid (unaligned) pointer: {}", .{ msg, p });
+        std.log.err("{s}: invalid (unaligned) pointer: {*}", .{ msg, p });
         return null;
     }
 
@@ -585,15 +585,15 @@ fn mi_checked_ptr_segment(p: anytype, msg: []const u8) ?*mi_segment_t {
 
     if (MI_DEBUG > 0) {
         if (mi_unlikely(!mi_is_in_heap_region(p))) {
-            std.log.warn("{s}: pointer might not point to a valid heap region: {} (this may still be a valid very large allocation (over 64MiB))", .{ msg, p });
+            std.log.warn("{s}: pointer might not point to a valid heap region: {*} (this may still be a valid very large allocation (over 64MiB))", .{ msg, p });
             if (mi_likely(_mi_ptr_cookie(segment) == segment.cookie)) {
-                std.log.warn("(yes, the previous pointer {} was valid after all)", .{p});
+                std.log.warn("(yes, the previous pointer {*} was valid after all)", .{p});
             }
         }
     }
     if (MI_DEBUG > 0 or MI_SECURE >= 4) {
         if (mi_unlikely(_mi_ptr_cookie(segment) != segment.cookie)) {
-            std.log.warn("{s}: pointer does not point to a valid heap space: {}", .{ msg, p });
+            std.log.warn("{s}: pointer does not point to a valid heap space: {*}", .{ msg, p });
             return null;
         }
     }
