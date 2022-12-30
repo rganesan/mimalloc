@@ -709,7 +709,7 @@ const MI_MAX_SLICE_SHIFT = 6; // at most 64 slices
 const MI_MAX_SLICES = (1 << MI_MAX_SLICE_SHIFT);
 const MI_MIN_SLICES = 2;
 
-fn mi_page_free_list_extend_secure(heap: *const mi_heap_t, page: *const mi_page_t, bsize: usize, extend: usize, stats: *const mi_stats_t) void {
+fn mi_page_free_list_extend_secure(heap: *mi_heap_t, page: *mi_page_t, bsize: usize, extend: usize, stats: *const mi_stats_t) void {
     _ = stats;
     if (MI_SECURE <= 2) {
         mi_assert_internal(page.free == null);
@@ -721,14 +721,14 @@ fn mi_page_free_list_extend_secure(heap: *const mi_heap_t, page: *const mi_page_
 
     // initialize a randomized free list
     // set up `slice_count` slices to alternate between
-    var shift: usize = MI_MAX_SLICE_SHIFT;
+    var shift: std.math.Log2Int(usize) = MI_MAX_SLICE_SHIFT;
     while ((extend >> shift) == 0) {
         shift -= 1;
     }
     const slice_count = @intCast(usize, 1) << shift;
     const slice_extend = extend / slice_count;
     mi_assert_internal(slice_extend >= 1);
-    var blocks: [MI_MAX_SLICES]mi_block_t = undefined; // current start of the slice
+    var blocks: [MI_MAX_SLICES]*mi_block_t = undefined; // current start of the slice
     var counts: [MI_MAX_SLICES]usize = undefined; // available objects in the slice
     var i: usize = 0;
     while (i < slice_count) : (i += 1) {
@@ -751,7 +751,7 @@ fn mi_page_free_list_extend_secure(heap: *const mi_heap_t, page: *const mi_page_
         const round = i % MI_INTPTR_SIZE;
         if (round == 0) rnd = _mi_random_shuffle(rnd);
         // select a random next slice index
-        var next = ((rnd >> 8 * round) & (slice_count - 1));
+        var next = (std.math.shr(usize, rnd, 8 * round) & (slice_count - 1));
         while (counts[next] == 0) { // ensure it still has space
             next += 1;
             if (next == slice_count) next = 0;
@@ -959,7 +959,7 @@ fn mi_find_free_page(heap: *mi_heap_t, size: usize) ?*mi_page_t {
     const page = pq.first orelse return mi_page_queue_find_free_ex(heap, pq, true);
     if (MI_SECURE >= 3) { // in secure mode, we extend half the time to increase randomness
         if (page.capacity < page.reserved and ((_mi_heap_random_next(heap) & 1) == 1)) {
-            mi_page_extend_free(heap, page, heap.tld);
+            mi_page_extend_free(heap, page, heap.tld.?);
             mi_assert_internal(mi_page_immediate_available(page));
         }
     } else {

@@ -139,7 +139,7 @@ fn mi_heap_page_is_valid(heap: *mi_heap_t, pq: *mi_page_queue_t, page: *mi_page_
     _ = pq;
     _ = arg1;
     _ = arg2;
-    if (MI_DEBUG < 2) return;
+    if (MI_DEBUG < 2) return true;
     mi_assert_internal(mi_page_heap(page) == heap);
     const segment = _mi_page_segment(page);
     mi_assert_internal(segment.thread_id.load(AtomicOrder.Monotonic) == heap.thread_id);

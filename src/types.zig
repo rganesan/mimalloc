@@ -76,7 +76,7 @@ pub const MI_SECURE = 0;
 // MI_DEBUG = 1  // basic assertion checks and statistics, check double free, corrupted free list, and invalid pointer free.
 // MI_DEBUG = 2  // + internal assertion checks
 // MI_DEBUG = 3  // + extensive internal invariant checking (cmake -DDEBUG_FULL=ON)
-pub const MI_DEBUG = 3;
+pub const MI_DEBUG = 1;
 
 // Reserve extra padding at the end of each block to be more resilient against heap block overflows.
 // The padding can detect byte-precise buffer overflow on free.
@@ -896,6 +896,21 @@ pub fn _mi_os_decommit(addr: *anyopaque, size: usize, tld_stats: *mi_stats_t) bo
     return _mi_os_reset(addr, size, tld_stats);
 }
 
+// TODO:
+pub fn _mi_os_protect(addr: *anyopaque, size: usize) bool {
+    // return mi_os_protectx(addr, size, true);
+    _ = addr;
+    _ = size;
+    return true;
+}
+
+pub fn _mi_os_unprotect(addr: *anyopaque, size: usize) bool {
+    // return mi_os_protectx(addr, size, false);
+    _ = addr;
+    _ = size;
+    return true;
+}
+
 pub fn _mi_os_numa_node(tld: ?*mi_os_tld_t) usize {
     _ = tld;
     return 0;
@@ -970,16 +985,16 @@ pub fn _mi_random_shuffle(x_in: usize) usize {
     if (MI_INTPTR_SIZE == 8) {
         // by Sebastiano Vigna, see: <http://xoshiro.di.unimi.it/splitmix64.c>
         x ^= x >> 30;
-        x *= 0xbf58476d1ce4e5b9;
+        x *%= 0xbf58476d1ce4e5b9;
         x ^= x >> 27;
-        x *= 0x94d049bb133111eb;
+        x *%= 0x94d049bb133111eb;
         x ^= x >> 31;
     } else if (MI_INTPTR_SIZE == 4) {
         // by Chris Wellons, see: <https://nullprogram.com/blog/2018/07/31/>
         x ^= x >> 16;
-        x *= 0x7feb352d;
+        x *%= 0x7feb352d;
         x ^= x >> 15;
-        x *= 0x846ca68b;
+        x *%= 0x846ca68b;
         x ^= x >> 16;
     }
     return x;

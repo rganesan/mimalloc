@@ -585,7 +585,8 @@ pub fn _mi_segment_page_start(segment: *const mi_segment_t, page: *const mi_page
     return p;
 }
 
-fn mi_segment_calculate_slices(required: usize, pre_size: ?*usize, info_slices: ?*usize) usize {
+fn mi_segment_calculate_slices(required_in: usize, pre_size: ?*usize, info_slices: ?*usize) usize {
+    var required = required_in;
     const page_size = _mi_os_page_size();
     var size = _mi_align_up(@sizeOf(mi_segment_t), page_size);
     var guardsize: usize = 0;
@@ -628,9 +629,9 @@ fn mi_segment_os_free(segment: *mi_segment_t, tld: *mi_segments_tld_t) void {
         // _mi_os_unprotect(segment, mi_segment_size(segment)); // ensure no more guard pages are set
         // unprotect the guard pages; we cannot just unprotect the whole segment size as part may be decommitted
         const os_pagesize = _mi_os_page_size();
-        _mi_os_unprotect(@ptrCast(*u8, segment) + mi_segment_info_size(segment) - os_pagesize, os_pagesize);
-        const end = @ptrCast(*const u8, segment) + mi_segment_size(segment) - os_pagesize;
-        _mi_os_unprotect(end, os_pagesize);
+        _ = _mi_os_unprotect(@ptrCast([*]u8, segment) + mi_segment_info_size(segment) - os_pagesize, os_pagesize);
+        const end = @ptrCast([*]u8, segment) + mi_segment_size(segment) - os_pagesize;
+        _ = _mi_os_unprotect(end, os_pagesize);
     }
 
     // purge delayed decommits now? (no, leave it to the cache)
@@ -1120,10 +1121,10 @@ fn mi_segment_init(segment_in: ?*mi_segment_t, required: usize, req_arena_id: mi
         // and the page data, and at the end of the segment.
         const os_pagesize = _mi_os_page_size();
         mi_assert_internal(mi_segment_info_size(segment) - os_pagesize >= pre_size);
-        _mi_os_protect(@ptrCast(*u8, segment) + mi_segment_info_size(segment) - os_pagesize, os_pagesize);
-        const end = @ptrCast(*u8, segment) + mi_segment_size(segment) - os_pagesize;
-        mi_segment_ensure_committed(segment, end, os_pagesize, tld.stats);
-        _mi_os_protect(end, os_pagesize);
+        _ = _mi_os_protect(@ptrCast([*]u8, segment) + mi_segment_info_size(segment) - os_pagesize, os_pagesize);
+        const end = @ptrCast([*]u8, segment) + mi_segment_size(segment) - os_pagesize;
+        _ = mi_segment_ensure_committed(segment, end, os_pagesize, tld.stats.?);
+        _ = _mi_os_protect(end, os_pagesize);
         if (slice_entries == segment_slices) segment.slice_entries -= 1; // don't use the last slice :-(
         guard_slices = 1;
     }
