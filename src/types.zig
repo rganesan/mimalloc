@@ -277,9 +277,9 @@ pub const mi_page_t = struct {
         return Self{ .xheap = Atomic(?*mi_heap_t).init(null) };
     }
 
-    pub fn block_size(self: *const Self) usize {
+    fn block_size(self: *const Self) usize {
         const bsize = self.xblock_size;
-        assert(bsize > 0);
+        mi_assert_internal(bsize > 0);
         if (bsize < MI_HUGE_BLOCK_SIZE) {
             return bsize;
         }
@@ -289,37 +289,37 @@ pub const mi_page_t = struct {
         return psize;
     }
 
-    pub fn thread_free(self: *const Self) ?*mi_block_t {
+    fn thread_free(self: *const Self) ?*mi_block_t {
         return @intToPtr(?*mi_block_t, self.xthread_free.load(AtomicOrder.Monotonic) & ~@intCast(mi_thread_free_t, 3)); // TODO: check boolMask usage
     }
 
-    pub fn heap(self: *const Self) ?*mi_heap_t {
+    fn heap(self: *const Self) ?*mi_heap_t {
         return self.xheap.load(AtomicOrder.Monotonic); // TODO: check order
     }
 
-    pub fn all_free(self: *const Self) bool {
+    fn all_free(self: *const Self) bool {
         return self.used == 0;
     }
 
-    pub fn is_valid(self: *const Self) bool {
+    fn is_valid(self: *const Self) bool {
         // TODO: page.zig
         _ = self;
         return true;
     }
 
-    pub fn segment(self: *const Self) *mi_segment_t {
+    fn segment(self: *const Self) *mi_segment_t {
         return @intToPtr(*mi_segment_t, @ptrToInt(self) & MI_SEGMENT_MASK);
     }
 
-    pub fn is_in_full(self: *const Self) bool {
+    fn is_in_full(self: *const Self) bool {
         return self.flags.x.in_full == 1;
     }
 
-    pub fn set_in_full(self: *Self, in_full: bool) void {
+    fn set_in_full(self: *Self, in_full: bool) void {
         self.flags.x.in_full = if (in_full) 1 else 0;
     }
 
-    pub fn has_aligned(self: *const Self) bool {
+    fn has_aligned(self: *const Self) bool {
         self.flags.x.has_aligned;
     }
 };
@@ -432,7 +432,7 @@ pub const mi_page_queue_t = struct {
         return self.block_size > mi.MEDIUM_OBJ_SIZE_MAX;
     }
 
-    pub fn contains(self: *const Self, page: *const mi_page_t) bool {
+    fn contains(self: *const Self, page: *const mi_page_t) bool {
         if (MI_DEBUG < 1) return true;
         var list = self.first;
         while (list) |l| : (list = l.next) {
@@ -476,19 +476,19 @@ pub const mi_heap_t = struct {
     next: ?*mi_heap_t = null, // list of heaps per thread
     no_reclaim: bool = false, // `true` if this heap should not reclaim abandoned pages
 
-    pub fn is_initialized(self: *const Self) bool {
+    fn is_initialized(self: *const Self) bool {
         return self != &mi._mi_heap_empty;
     }
 
-    pub fn is_backing(self: *const Self) bool {
+    fn is_backing(self: *const Self) bool {
         return (self.tld.?.heap_backing.? == self);
     }
 
-    pub fn is_default(self: *const Self) bool {
+    fn is_default(self: *const Self) bool {
         return (self == mi.mi_get_default_heap());
     }
 
-    pub fn contains(self: *const Self, pq: *const mi_page_queue_t) bool {
+    fn contains(self: *const Self, pq: *const mi_page_queue_t) bool {
         if (MI_DEBUG < 1) return true;
         const pq_addr = @ptrToInt(pq);
         return pq_addr >= @ptrToInt(&self.pages[0]) and pq_addr <= @ptrToInt(&self.pages[mi.MI_BIN_FULL]);
@@ -745,6 +745,10 @@ pub inline fn mi_atomic_load_ptr_relaxed(comptime T: type, a: *Atomic(?*T)) ?*T 
     return a.load(AtomicOrder.Monotonic);
 }
 
+pub inline fn mi_atomic_load_ptr_acquire(comptime T: type, a: *Atomic(?*T)) ?*T {
+    return a.load(AtomicOrder.Acquire);
+}
+
 pub inline fn mi_atomic_store_ptr_release(comptime T: type, a: *Atomic(?*T), val: ?*T) void {
     a.store(val, AtomicOrder.Release);
 }
@@ -950,7 +954,7 @@ fn mi_os_get_aligned_hint(try_alignment: usize, size_in: usize) ?[*]align(mem.pa
 // Helper for shifts
 pub fn mi_shift_cast(shift: usize) std.math.Log2Int(u64) {
     const x = @intCast(std.math.Log2Int(u64), shift);
-    assert(x == shift);
+    mi_assert_internal(x == shift);
     return x;
 }
 

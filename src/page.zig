@@ -479,7 +479,7 @@ pub fn _mi_page_free_collect(page: *mi_page_t, force: bool) void {
 // called from segments when reclaiming abandoned pages
 pub fn _mi_page_reclaim(heap: *mi_heap_t, page: *mi_page_t) void {
     mi_assert_expensive(mi_page_is_valid_init(page));
-    mi_assert_internal(page.heap() == heap);
+    mi_assert_internal(mi_page_heap(page) == heap);
     mi_assert_internal(mi_page_thread_free_flag(page) != .MI_NEVER_DELAYED_FREE);
     mi_assert_internal(_mi_page_segment(page).kind != .MI_SEGMENT_HUGE);
     mi_assert_internal(!page.b.is_reset);
@@ -504,7 +504,7 @@ fn mi_page_fresh_alloc(heap: *mi_heap_t, pq: ?*mi_page_queue_t, block_size: usiz
 
 // Get a fresh page to use
 fn mi_page_fresh(heap: *mi_heap_t, pq: *mi_page_queue_t) ?*mi_page_t {
-    mi_assert_internal(heap.contains(pq));
+    mi_assert_internal(mi_heap_contains_queue(heap, pq));
     const page = mi_page_fresh_alloc(heap, pq, pq.block_size) orelse return null;
     mi_assert_internal(pq.block_size == mi_page_block_size(page));
     mi_assert_internal(pq == mi_page_queue(heap, mi_page_block_size(page)));
@@ -556,8 +556,8 @@ pub fn _mi_heap_delayed_free_partial(heap: *mi_heap_t) bool {
 // Move a page from the full list back to a regular list
 pub fn _mi_page_unfull(page: *mi_page_t) void {
     mi_assert_expensive(_mi_page_is_valid(page));
-    mi_assert_internal(page.is_in_full());
-    if (!page.is_in_full()) return;
+    mi_assert_internal(mi_page_is_in_full(page));
+    if (!mi_page_is_in_full(page)) return;
 
     const heap = mi_page_heap(page).?;
     const pqfull = &heap.pages[MI_BIN_FULL];
@@ -570,7 +570,7 @@ pub fn _mi_page_unfull(page: *mi_page_t) void {
 fn mi_page_to_full(page: *mi_page_t, pq: *mi_page_queue_t) void {
     mi_assert_internal(pq == mi_page_queue_of(page));
     mi_assert_internal(!mi_page_immediate_available(page));
-    mi_assert_internal(!page.is_in_full());
+    mi_assert_internal(mi_page_is_in_full(page));
 
     if (mi_page_is_in_full(page)) return;
     mi_page_queue_enqueue_from(&mi_page_heap(page).?.pages[MI_BIN_FULL], pq, page);

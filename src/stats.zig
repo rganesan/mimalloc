@@ -17,8 +17,17 @@ const mi = struct {
     usingnamespace @import("init.zig");
     usingnamespace @import("heap.zig");
     usingnamespace @import("page-queue.zig");
+    fn noop(cond: bool) void {
+        _ = cond;
+    }
 };
 
+const mi_assert = assert;
+const mi_assert_internal = if (MI_DEBUG > 1) mi_assert else mi.noop;
+const mi_assert_expensive = if (MI_DEBUG > 2) mi_assert else mi.noop;
+
+// #defines
+const MI_DEBUG = mi.MI_DEBUG;
 const MI_STAT = mi.MI_STAT;
 const MI_BIN_HUGE = mi.MI_BIN_HUGE;
 
@@ -314,7 +323,7 @@ fn mi_buffered_out(msg: []const u8, arg: ?*anyopaque) void {
     var buf = @ptrCast(*buffered_t, @alignCast(@alignOf(buffered_t), arg));
     for (msg) |c| {
         if (buf.used >= buf.count) mi_buffered_flush(buf);
-        assert(buf.used < buf.count);
+        mi_assert_internal(buf.used < buf.count);
         buf.buf[buf.used] = c;
         buf.used += 1;
         if (c == '\n') mi_buffered_flush(buf);

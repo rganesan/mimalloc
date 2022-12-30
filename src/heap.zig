@@ -32,6 +32,7 @@ const mi_assert_expensive = if (MI_DEBUG > 2) mi_assert else mi.noop;
 // Types
 const mi_heap_t = mi.mi_heap_t;
 const mi_page_t = mi.mi_page_t;
+const mi_block_t = mi.mi_block_t;
 const mi_page_queue_t = mi.mi_page_queue_t;
 
 // #defines
@@ -42,14 +43,19 @@ const MI_SMALL_SIZE_MAX = mi.MI_SMALL_SIZE_MAX;
 const MI_PADDING_SIZE = mi.MI_PADDING_SIZE;
 
 // Function aliases
+const mi_get_default_heap = mi.mi_get_default_heap();
 const _mi_heap_set_default_direct = mi._mi_heap_set_default_direct;
 const _mi_wsize_from_size = mi._mi_wsize_from_size;
 const _mi_page_free_collect = mi._mi_page_free_collect;
 const _mi_page_free = mi._mi_page_free;
+const _mi_page_is_valid = mi._mi_page_is_valid;
 const _mi_page_abandon = mi._mi_page_abandon;
 const _mi_page_queue_append = mi._mi_page_queue_append;
 const _mi_page_use_delayed_free = mi._mi_page_use_delayed_free;
+const mi_page_thread_free = mi.mi_page_thread_free;
 const mi_page_all_free = mi.mi_page_all_free;
+const mi_page_heap = mi.mi_page_heap;
+const _mi_page_segment = mi._mi_page_segment;
 const _mi_deferred_free = mi._mi_deferred_free;
 const _mi_heap_delayed_free_all = mi._mi_heap_delayed_free_all;
 const _mi_heap_collect_retired = mi._mi_heap_collect_retired;
@@ -58,6 +64,10 @@ const _mi_segment_thread_collect = mi._mi_segment_thread_collect;
 const _mi_segment_cache_collect = mi._mi_segment_cache_collect;
 const _mi_segment_page_free = mi._mi_segment_page_free;
 const _mi_heap_delayed_free_partial = mi._mi_heap_delayed_free_partial;
+
+// Atomics
+const mi_atomic_load_ptr_acquire = mi.mi_atomic_load_ptr_acquire;
+const mi_atomic_load_ptr_relaxed = mi.mi_atomic_load_ptr_relaxed;
 
 const _mi_abandoned_reclaim_all = mi._mi_abandoned_reclaim_all;
 
@@ -71,6 +81,14 @@ const Arg2 = opaque {};
 // inlines from mimalloc-internal.h
 pub inline fn mi_heap_is_initialized(heap: *mi_heap_t) bool {
     return (heap != &mi._mi_heap_empty);
+}
+
+pub inline fn mi_heap_is_backing(heap: *mi_heap_t) bool {
+    return (heap.tld.?.heap_backing.? == heap);
+}
+
+pub inline fn mi_heap_is_default(heap: *mi_heap_t) bool {
+    return (heap == mi_get_default_heap());
 }
 
 pub inline fn _mi_heap_get_free_small_page(heap: *mi_heap_t, size: usize) *mi_page_t {
@@ -100,14 +118,14 @@ fn mi_heap_visit_pages(heap: *mi_heap_t, visit_fn: heap_page_visitor_fun, arg1: 
         var page = pq.first;
         while (page != null) {
             const next = page.?.next; // save next in case the page gets removed from the queue
-            assert(page.?.heap() == heap);
+            mi_assert_internal(mi_page_heap(page.?) == heap);
             count += 1;
             if (!visit_fn(heap, pq, page.?, arg1, arg2)) return false;
             page = next; // and continue
         }
     }
     if (MI_DEBUG > 1)
-        assert(count == total);
+        mi_assert_internal(count == total);
     return true;
 }
 
@@ -116,10 +134,10 @@ fn mi_heap_page_is_valid(heap: *mi_heap_t, pq: *mi_page_queue_t, page: *mi_page_
     _ = arg1;
     _ = arg2;
     if (MI_DEBUG < 2) return;
-    assert(page.heap() == heap);
-    const segment = page.segment();
-    assert(segment.thread_id.load(AtomicOrder.Monotonic) == heap.thread_id);
-    assert(page.is_valid());
+    mi_assert_internal(mi_page_heap(page) == heap);
+    const segment = _mi_page_segment(page);
+    mi_assert_internal(segment.thread_id.load(AtomicOrder.Monotonic) == heap.thread_id);
+    mi_assert_expensive(_mi_page_is_valid(page));
     return true;
 }
 
@@ -140,7 +158,7 @@ const mi_collect_t = enum { MI_NORMAL, MI_FORCE, MI_ABANDON };
 
 fn mi_heap_page_collect(heap: *mi_heap_t, pq: *mi_page_queue_t, page: *mi_page_t, args_collect: ?*const Arg1, arg2: ?*const Arg2) bool {
     _ = arg2;
-    assert(mi_heap_page_is_valid(heap, pq, page, null, null));
+    mi_assert_internal(mi_heap_page_is_valid(heap, pq, page, null, null));
     const collect = @ptrCast(*const mi_collect_t, args_collect).*;
     _mi_page_free_collect(page, @enumToInt(collect) >= @enumToInt(mi_collect_t.MI_FORCE));
     if (mi_page_all_free(page)) {
@@ -164,13 +182,13 @@ fn mi_heap_page_never_delayed_free(heap: *mi_heap_t, pq: *mi_page_queue_t, page:
 }
 
 fn mi_heap_collect_ex(heap: *mi_heap_t, collect: mi_collect_t) void {
-    if (!heap.is_initialized()) return;
+    if (!mi_heap_is_initialized(heap)) return;
 
     const force = @enumToInt(collect) >= @enumToInt(mi_collect_t.MI_FORCE);
     _mi_deferred_free(heap, force);
 
     // note: never reclaim on collect but leave it to threads that need storage to reclaim
-    const force_main = mi._mi_is_main_thread() and heap.is_backing() and !heap.no_reclaim and if (NDEBUG) collect == .MI_FORCE else force;
+    const force_main = mi._mi_is_main_thread() and mi_heap_is_backing(heap) and !heap.no_reclaim and if (NDEBUG) collect == .MI_FORCE else force;
 
     if (force_main) {
         // the main thread is abandoned (end-of-program), try to reclaim all abandoned segments.
@@ -192,7 +210,7 @@ fn mi_heap_collect_ex(heap: *mi_heap_t, collect: mi_collect_t) void {
 
     // collect all pages owned by this thread
     _ = mi_heap_visit_pages(heap, mi_heap_page_collect, @ptrCast(*const Arg1, &collect), null);
-    assert(collect != .MI_ABANDON or heap.thread_delayed_free.load(builtin.AtomicOrder.Acquire) == null);
+    mi_assert_internal(collect != .MI_ABANDON or mi_atomic_load_ptr_acquire(mi_block_t, &heap.thread_delayed_free) == null);
 
     // collect abandoned segments (in particular, decommit expired parts of segments in the abandoned segment list)
     // note: forced decommit can be quite expensive if many threads are created/destroyed so we do not force on abandonment
@@ -208,7 +226,7 @@ fn mi_heap_collect_ex(heap: *mi_heap_t, collect: mi_collect_t) void {
     _mi_segment_cache_collect(collect == .MI_FORCE, &heap.tld.?.os);
 
     // collect regions on program-exit (or shared library unload)
-    if (force and mi._mi_is_main_thread() and heap.is_backing()) {
+    if (force and mi._mi_is_main_thread() and mi_heap_is_backing(heap)) {
         //  _mi_mem_collect(&heap.tld.os);
     }
 }
@@ -235,9 +253,9 @@ pub fn mi_heap_get_default() *mi_heap_t {
 }
 
 pub fn mi_heap_get_backing() *mi_heap_t {
-    const heap = mi_heap_get_default();
-    const bheap = heap.tld.heap_backing;
-    assert(bheap.thread_id == mi._mi_thread_id());
+    const heap = mi_heap_get_default().?;
+    const bheap = heap.tld.heap_backing.?;
+    mi_assert_internal(bheap.thread_id == mi._mi_thread_id());
     return bheap;
 }
 
@@ -273,7 +291,7 @@ pub fn _mi_heap_random_next(heap: *mi_heap_t) usize {
 
 // zero out the page queues
 fn mi_heap_reset_pages(heap: *mi_heap_t) void {
-    assert(heap.is_initialized());
+    mi_assert_internal(mi_heap_is_initialized(heap));
     for (heap.pages_free_direct) |_, i| {
         heap.pages_free_direct[i] = &mi._mi_page_empty;
     }
@@ -284,11 +302,12 @@ fn mi_heap_reset_pages(heap: *mi_heap_t) void {
 
 // called from `mi_heap_destroy` and `mi_heap_delete` to free the internal heap resources.
 fn mi_heap_free(heap: *mi_heap_t) void {
-    assert(heap.is_initialized());
-    if (heap.is_backing()) return; // dont free the backing heap
+    mi_assert_internal(mi_heap_is_initialized(heap));
+    if (!mi_heap_is_initialized(heap)) return;
+    if (mi_heap_is_backing(heap)) return; // dont free the backing heap
 
     // reset default
-    if (heap.is_default()) {
+    if (mi_heap_is_default()) {
         _mi_heap_set_default_direct(heap.tld.?.heap_backing.?);
     }
 
@@ -300,7 +319,7 @@ fn mi_heap_free(heap: *mi_heap_t) void {
         prev = curr;
         curr = curr.?.next;
     }
-    assert(curr == heap);
+    mi_assert_internal(curr == heap);
     if (curr == heap) {
         if (prev != null) {
             prev.?.next = heap.next;
@@ -308,7 +327,7 @@ fn mi_heap_free(heap: *mi_heap_t) void {
             heap.tld.?.heaps = heap.next;
         }
     }
-    assert(heap.tld.?.heaps != null);
+    mi_assert_internal(heap.tld.?.heaps != null);
 
     // and free the used memory
     mi.mi_free(heap);
@@ -347,7 +366,7 @@ fn _mi_heap_page_destroy(heap: *mi_heap_t, pq: *mi_page_queue_t, page: *mi_page_
     }
 
     // pretend it is all free now
-    assert(page.thread_free() == null);
+    mi_assert_internal(mi_page_thread_free(page) == null);
     page.used = 0;
 
     // and free the page
@@ -366,9 +385,9 @@ fn _mi_heap_destroy_pages(heap: *mi_heap_t) void {
 }
 
 pub fn mi_heap_destroy(heap: *mi_heap_t) void {
-    assert(heap.is_initialized());
-    assert(heap.no_reclaim);
-    assert(mi_heap_is_valid(heap));
+    mi_assert_internal(mi_heap_is_initialized(heap));
+    mi_assert_internal(heap.no_reclaim);
+    mi_assert_expensive(mi_heap_is_valid(heap));
     if (!heap.no_reclaim) {
         // don't free in case it may contain reclaimed pages
         mi_heap_delete(heap);
@@ -403,14 +422,14 @@ fn mi_heap_absorb(heap: *mi_heap_t, from: *mi_heap_t) void {
         heap.page_count += pcount;
         from.page_count -= pcount;
     }
-    assert(from.page_count == 0);
+    mi_assert_internal(from.page_count == 0);
 
     // and do outstanding delayed frees in the `from` heap
     // note: be careful here as the `heap` field in all those pages no longer point to `from`,
     // turns out to be ok as `_mi_heap_delayed_free` only visits the list and calls a
     // the regular `_mi_free_delayed_block` which is safe.
     _mi_heap_delayed_free_all(from);
-    assert(from.thread_delayed_free.load(AtomicOrder.Acquire) == null);
+    mi_assert_internal(mi_atomic_load_ptr_relaxed(mi_block_t, &from.thread_delayed_free) == null);
 
     // and reset the `from` heap
     mi_heap_reset_pages(from);
@@ -418,23 +437,25 @@ fn mi_heap_absorb(heap: *mi_heap_t, from: *mi_heap_t) void {
 
 // Safe delete a heap without freeing any still allocated blocks in that heap.
 fn mi_heap_delete(heap: *mi_heap_t) void {
-    assert(heap.is_initialized());
-    assert(mi_heap_is_valid(heap));
+    mi_assert_internal(mi_heap_is_initialized(heap));
+    mi_assert_expensive(mi_heap_is_valid(heap));
 
-    if (!heap.is_backing()) {
+    if (!mi_heap_is_initialized(heap)) return;
+
+    if (!mi_heap_is_backing(heap)) {
         // transfer still used pages to the backing heap
         mi_heap_absorb(heap.tld.?.heap_backing.?, heap);
     } else {
         // the backing heap abandons its pages
         _mi_heap_collect_abandon(heap);
     }
-    assert(heap.page_count == 0);
+    mi_assert_internal(heap.page_count == 0);
     mi_heap_free(heap);
 }
 
 fn mi_heap_set_default(heap: *mi_heap_t) *mi_heap_t {
-    assert(mi.mi_heap_is_initialized(heap));
-    assert(mi_heap_is_valid(heap));
+    mi_assert_internal(mi.mi_heap_is_initialized(heap));
+    mi_assert_expensive(mi_heap_is_valid(heap));
     const old = mi.mi_get_default_heap();
     mi._mi_heap_set_default_direct(heap);
     return old;
@@ -448,7 +469,7 @@ fn mi_heap_set_default(heap: *mi_heap_t) *mi_heap_t {
 fn mi_heap_of_block(p: *opaque {}) *mi_heap_t {
     const segment = mi._mi_ptr_segment(p);
     const valid = (mi._mi_ptr_cookie(segment) == segment.cookie);
-    assert(valid);
+    mi_assert_internal(valid);
     return mi.mi_page_heap(mi._mi_segment_page_of(segment, p));
 }
 
@@ -498,7 +519,7 @@ fn mi_heap_area_visit_blocks(xarea: *const mi_heap_area_ex_t, visitor: mi.mi_blo
     if (page == null) return true;
 
     mi._mi_page_free_collect(page, true);
-    assert(page.local_free == null);
+    mi_assert_internal(page.local_free == null);
     if (page.used == 0) return true;
 
     const bsize = mi.mi_page_block_size(page);
@@ -508,7 +529,7 @@ fn mi_heap_area_visit_blocks(xarea: *const mi_heap_area_ex_t, visitor: mi.mi_blo
 
     if (page.capacity == 1) {
         // optimize page with one block
-        assert(page.used == 1 and page.free == null);
+        mi_assert_internal(page.used == 1 and page.free == null);
         return visitor(mi.mi_page_heap(page), area, pstart, ubsize, arg);
     }
 
@@ -520,16 +541,16 @@ fn mi_heap_area_visit_blocks(xarea: *const mi_heap_area_ex_t, visitor: mi.mi_blo
     var block = page.free;
     while (block != null) : (block = mi.mi_block_next(page, block)) {
         free_count += 1;
-        assert(@intToPtr(*u8, block) >= pstart and (@intToPtr(*u8, block) < (pstart + psize)));
+        mi_assert_internal(@intToPtr(*u8, block) >= pstart and (@intToPtr(*u8, block) < (pstart + psize)));
         const offset = @intToPtr(*u8, block) - pstart;
-        assert(offset % bsize == 0);
+        mi_assert_internal(offset % bsize == 0);
         const blockidx = offset / bsize; // Todo: avoid division?
-        assert(blockidx < MI_MAX_BLOCKS);
+        mi_assert_internal(blockidx < MI_MAX_BLOCKS);
         const bitidx = (blockidx / @sizeOf(usize));
         const bit = blockidx - (bitidx * @sizeOf(usize));
         free_map[bitidx] |= (@intCast(usize, 1) << bit);
     }
-    assert(page.capacity == (free_count + page.used));
+    mi_assert_internal(page.capacity == (free_count + page.used));
 
     // walk through all blocks skipping the free ones
     var used_count: usize = 0;
@@ -546,7 +567,7 @@ fn mi_heap_area_visit_blocks(xarea: *const mi_heap_area_ex_t, visitor: mi.mi_blo
             if (!visitor(mi.mi_page_heap(page), area, block, ubsize, arg)) return false;
         }
     }
-    assert(page.used == used_count);
+    mi_assert_internal(page.used == used_count);
     return true;
 }
 

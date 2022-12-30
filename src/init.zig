@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const builtin = std.builtin;
+const assert = std.debug.assert;
 const AtomicOrder = builtin.AtomicOrder;
 const AtomicRmwOp = builtin.AtomicRmwOp;
 const mi = struct {
@@ -14,8 +15,16 @@ const mi = struct {
     usingnamespace @import("heap.zig");
     usingnamespace @import("stats.zig");
     usingnamespace @import("options.zig");
+
+    fn noop(cond: bool) void {
+        _ = cond;
+    }
 };
-const assert = std.debug.assert;
+
+const mi_assert = assert;
+const mi_assert_internal = if (MI_DEBUG > 1) mi_assert else mi.noop;
+const mi_assert_expensive = if (MI_DEBUG > 2) mi_assert else mi.noop;
+
 const Atomic = std.atomic.Atomic;
 const Thread = std.Thread;
 const Prng = std.rand.DefaultPrng;
@@ -268,7 +277,7 @@ fn mi_thread_data_collect() void {
 
 // Initialize the thread local default heap, called from `thread_init`
 fn _mi_heap_init() bool {
-    if (mi_get_default_heap().is_initialized()) return true;
+    if (mi_heap_is_initialized(mi_get_default_heap())) return true;
     if (_mi_is_main_thread()) {
         // assert_internal(_heap_main.thread_id != 0);  // can happen on freeBSD where alloc is called before any initialization
         // the main heap is statically allocated
@@ -315,13 +324,13 @@ fn _mi_heap_done(heap: *mi_heap_t) bool {
     while (curr != null) {
         var next = curr.next; // save `next` as `curr` will be freed
         if (curr != heap) {
-            assert(!mi_heap_is_backing(curr));
+            mi_assert_internal(!mi_heap_is_backing(curr));
             mi_heap_delete(curr);
         }
         curr = next;
     }
-    assert(heap.tld.heaps == heap and heap.next == null);
-    assert(mi_heap_is_backing(heap));
+    mi_assert_internal(heap.tld.heaps == heap and heap.next == null);
+    mi_assert_internal(mi_heap_is_backing(heap));
 
     // collect if not the main thread
     if (heap != &_mi_heap_main) {
@@ -344,7 +353,7 @@ fn _mi_heap_done(heap: *mi_heap_t) bool {
             // never free the main thread even in debug mode; if a dll is linked statically with mimalloc,
             // there may still be delete/free calls after the fls_done is called. Issue #207
             _mi_heap_destroy_pages(heap);
-            assert(heap.tld.heap_backing == &_mi_heap_main);
+            mi_assert_internal(heap.tld.heap_backing == &_mi_heap_main);
         }
     }
     return false;

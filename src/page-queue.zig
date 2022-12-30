@@ -19,7 +19,15 @@ const mi = struct {
     usingnamespace @import("page.zig");
     usingnamespace @import("page-queue.zig");
     usingnamespace @import("segment.zig");
+
+    fn noop(cond: bool) void {
+        _ = cond;
+    }
 };
+
+const mi_assert = assert;
+const mi_assert_internal = if (MI_DEBUG > 1) mi_assert else mi.noop;
+const mi_assert_expensive = if (MI_DEBUG > 2) mi_assert else mi.noop;
 
 // #defines
 const MI_DEBUG = mi.MI_DEBUG;
@@ -38,16 +46,10 @@ const mi_page_queue_t = mi.mi_page_queue_t;
 
 // Functions
 
-fn noop(cond: bool) void {
-    _ = cond;
-}
-
 const mi_page_is_in_full = mi.mi_page_is_in_full;
 const mi_page_set_in_full = mi.mi_page_set_in_full;
 const mi_page_heap = mi.mi_page_heap;
 const _mi_page_segment = mi._mi_page_segment;
-
-const mi_assert_internal = if (MI_DEBUG > 1) assert else noop;
 
 //-----------------------------------------------------------
 // Minimal alignment in machine words (i.e. `sizeof(void*)`)
@@ -107,9 +109,9 @@ pub inline fn mi_bin(size: usize) u8 {
         // - adjust with 3 because we use do not round the first 8 sizes
         //   which each get an exact bin
         bin = ((b << 2) + @intCast(u8, (wsize >> @intCast(u5, b - 2)) & 0x03)) - 3;
-        assert(bin < MI_BIN_HUGE);
+        mi_assert_internal(bin < MI_BIN_HUGE);
     }
-    assert(bin > 0 and bin <= MI_BIN_HUGE);
+    mi_assert_internal(bin > 0 and bin <= MI_BIN_HUGE);
     return bin;
 }
 
@@ -170,20 +172,20 @@ pub fn mi_heap_contains_queue(heap: *const mi_heap_t, pq: *const mi_page_queue_t
 }
 
 pub fn mi_page_queue_of(page: *const mi_page_t) *mi_page_queue_t {
-    const bin = if (page.is_in_full()) MI_BIN_FULL else mi_bin(page.xblock_size);
+    const bin = if (mi_page_is_in_full(page)) MI_BIN_FULL else mi_bin(page.xblock_size);
     const heap = mi_page_heap(page).?;
-    assert(bin <= MI_BIN_FULL);
+    mi_assert_internal(bin <= MI_BIN_FULL);
     const pq = &heap.pages[bin];
-    assert(bin >= MI_BIN_HUGE or page.xblock_size == pq.block_size);
-    assert(mi_page_queue_contains(pq, page));
+    mi_assert_internal(bin >= MI_BIN_HUGE or page.xblock_size == pq.block_size);
+    mi_assert_expensive(mi_page_queue_contains(pq, page));
     return pq;
 }
 
 pub fn mi_heap_page_queue_of(heap: *mi_heap_t, page: *mi_page_t) *mi_page_queue_t {
     const bin = if (mi_page_is_in_full(page)) MI_BIN_FULL else mi_bin(page.xblock_size);
-    assert(bin <= MI_BIN_FULL);
+    mi_assert_internal(bin <= MI_BIN_FULL);
     const pq = &heap.pages[bin];
-    assert(mi_page_is_in_full(page) or page.xblock_size == pq.block_size);
+    mi_assert_internal(mi_page_is_in_full(page) or page.xblock_size == pq.block_size);
     return pq;
 }
 
@@ -222,7 +224,7 @@ fn mi_heap_queue_first_update(heap: *mi_heap_t, pq: *const mi_page_queue_t) void
     }
 
     // set size range to the right page
-    assert(start <= idx);
+    mi_assert_internal(start <= idx);
     var sz = start;
     while (sz <= idx) : (sz += 1) {
         pages_free[sz] = page.?;
@@ -230,9 +232,9 @@ fn mi_heap_queue_first_update(heap: *mi_heap_t, pq: *const mi_page_queue_t) void
 }
 
 pub fn mi_page_queue_remove(pq: *mi_page_queue_t, page: *mi_page_t) void {
-    mi_assert_internal(mi_page_queue_contains(pq, page));
+    mi_assert_expensive(mi_page_queue_contains(pq, page));
     mi_assert_internal(page.xblock_size == pq.block_size or (page.xblock_size > MI_MEDIUM_OBJ_SIZE_MAX and mi_page_queue_is_huge(pq)) or (mi_page_is_in_full(page) and mi_page_queue_is_full(pq)));
-    const heap = page.heap().?;
+    const heap = mi_page_heap(page).?;
 
     if (page.prev != null) page.prev.?.next = page.next;
     if (page.next != null) page.next.?.prev = page.prev;
@@ -247,11 +249,11 @@ pub fn mi_page_queue_remove(pq: *mi_page_queue_t, page: *mi_page_t) void {
     page.next = null;
     page.prev = null;
     // mi_atomic_store_ptr_release(mi_atomic_cast(void*, &page.heap), NULL);
-    page.set_in_full(false);
+    mi_page_set_in_full(page, false);
 }
 
 pub fn mi_page_queue_push(heap: *mi_heap_t, pq: *mi_page_queue_t, page: *mi_page_t) void {
-    mi_assert_internal(page.heap() == heap);
+    mi_assert_internal(mi_page_heap(page) == heap);
     mi_assert_internal(!mi_page_queue_contains(pq, page));
 
     mi_assert_internal(_mi_page_segment(page).kind != .MI_SEGMENT_HUGE);
@@ -264,7 +266,7 @@ pub fn mi_page_queue_push(heap: *mi_heap_t, pq: *mi_page_queue_t, page: *mi_page
     page.next = pq.first;
     page.prev = null;
     if (pq.first != null) {
-        assert(pq.first.?.prev == null);
+        mi_assert_internal(pq.first.?.prev == null);
         pq.first.?.prev = page;
         pq.first = page;
     } else {
@@ -278,23 +280,23 @@ pub fn mi_page_queue_push(heap: *mi_heap_t, pq: *mi_page_queue_t, page: *mi_page
 }
 
 pub fn mi_page_queue_enqueue_from(to: *mi_page_queue_t, from: *mi_page_queue_t, page: *mi_page_t) void {
-    assert(from.contains(page));
-    assert(!to.contains(page));
+    mi_assert_expensive(mi_page_queue_contains(from, page));
+    mi_assert_expensive(!mi_page_queue_contains(to, page));
 
-    assert((page.xblock_size == to.block_size and page.xblock_size == from.block_size) or
+    mi_assert_internal((page.xblock_size == to.block_size and page.xblock_size == from.block_size) or
         (page.xblock_size == to.block_size and mi_page_queue_is_full(from)) or
         (page.xblock_size == from.block_size and mi_page_queue_is_full(to)) or
         (page.xblock_size > MI_LARGE_OBJ_SIZE_MAX and mi_page_queue_is_huge(from)) or
         (page.xblock_size > MI_LARGE_OBJ_SIZE_MAX and mi_page_queue_is_full(to)));
 
-    const heap = page.heap().?;
+    const heap = mi_page_heap(page).?;
     if (page.prev != null) page.prev.?.next = page.next;
     if (page.next != null) page.next.?.prev = page.prev;
     if (page == from.last) from.last = page.prev;
     if (page == from.first) {
         from.first = page.next;
         // update first
-        assert(mi_heap_contains_queue(heap, from));
+        mi_assert_internal(mi_heap_contains_queue(heap, from));
         mi_heap_queue_first_update(heap, from);
     }
 
@@ -315,8 +317,8 @@ pub fn mi_page_queue_enqueue_from(to: *mi_page_queue_t, from: *mi_page_queue_t, 
 
 // Only called from `mi_heap_absorb`.
 fn _mi_page_queue_append(heap: *mi_heap_t, pq: *mi_page_queue_t, append: *mi_page_queue_t) usize {
-    assert(heap.contains(pq));
-    assert(pq.block_size == append.block_size);
+    mi_assert_internal(mi_heap_contains_queue(heap, pq));
+    mi_assert_internal(pq.block_size == append.block_size);
 
     if (append.first == null) return 0;
 
@@ -337,14 +339,14 @@ fn _mi_page_queue_append(heap: *mi_heap_t, pq: *mi_page_queue_t, append: *mi_pag
 
     if (pq.last == null) {
         // take over afresh
-        assert(pq.first == null);
+        mi_assert_internal(pq.first == null);
         pq.first = append.first;
         pq.last = append.last;
         mi_heap_queue_first_update(heap, pq);
     } else {
         // append to end
-        assert(pq.last != null);
-        assert(append.first != null);
+        mi_assert_internal(pq.last != null);
+        mi_assert_internal(append.first != null);
         pq.last.next = append.first;
         append.first.prev = pq.last;
         pq.last = append.last;
