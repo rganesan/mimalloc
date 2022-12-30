@@ -457,7 +457,7 @@ pub const mi_stats_t = struct {
     normal_count: mi_stat_counter_t = .{},
     huge_count: mi_stat_counter_t = .{},
     large_count: mi_stat_counter_t = .{},
-    normal_bins: if (MI_STAT > 1) [74]mi_stat_count_t else u0 = if (MI_STAT > 1) [_]mi_stat_count_t{.{}} ** 74,
+    normal_bins: if (MI_STAT > 1) [74]mi_stat_count_t else u0 = if (MI_STAT > 1) [_]mi_stat_count_t{.{}} ** 74 else 0,
 };
 
 // ------------------------------------------------------

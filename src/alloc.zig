@@ -380,6 +380,9 @@ fn mi_page_decode_padding(page: *const mi_page_t, block: *const mi_block_t, delt
 
 // Return the exact usable size of a block.
 fn mi_page_usable_size_of(page: *const mi_page_t, block: *const mi_block_t) usize {
+    if (MI_PADDING == 0) {
+        return mi_page_usable_block_size(page);
+    }
     var bsize: usize = undefined;
     var delta: usize = undefined;
     const ok = mi_page_decode_padding(page, block, &delta, &bsize);

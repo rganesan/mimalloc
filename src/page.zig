@@ -201,9 +201,9 @@ pub fn mi_ptr_encode(ptr: anytype, block: ?*const mi_block_t, keys: []const usiz
     return encoded;
 }
 
-pub fn mi_block_nextx(ptr: anytype, block: *const mi_block_t, keys: []const usize) ?*mi_block_t {
+pub fn mi_block_nextx(ptr: anytype, block: *const mi_block_t, keys: ?[]const usize) ?*mi_block_t {
     mi_track_mem_defined(block, @sizeOf(mi_block_t));
-    var next: ?*mi_block_t = if (MI_ENCODE_FREELIST) mi_ptr_decode(ptr, block.next, keys) else block.next;
+    var next: ?*mi_block_t = if (MI_ENCODE_FREELIST) mi_ptr_decode(ptr, block.next, keys.?) else @intToPtr(*mi_block_t, block.next);
     mi_track_mem_noaccess(block, @sizeOf(mi_block_t));
     return next;
 }
@@ -272,9 +272,9 @@ pub fn mi_page_block_at(page: *const mi_page_t, page_start: anytype, block_size:
     return @intToPtr(*mi_block_t, @ptrToInt(page_start) + i * block_size);
 }
 
-pub fn mi_block_set_nextx(ptr: anytype, block: *mi_block_t, next: ?*const mi_block_t, keys: []const usize) void {
+pub fn mi_block_set_nextx(ptr: anytype, block: *mi_block_t, next: ?*const mi_block_t, keys: ?[]const usize) void {
     mi_track_mem_undefined(block, @sizeOf(mi_block_t));
-    block.next = if (MI_ENCODE_FREELIST) mi_ptr_encode(ptr, next, keys) else @ptrToInt(next);
+    block.next = if (MI_ENCODE_FREELIST) mi_ptr_encode(ptr, next, keys.?) else @ptrToInt(next);
     mi_track_mem_noaccess(block, @sizeOf(mi_block_t));
 }
 
@@ -877,7 +877,7 @@ fn mi_page_init(heap: *mi_heap_t, page: *mi_page_t, block_size: usize, tld: *mi_
     if (MI_DEBUG > 0)
         page.b.is_zero = false // ensure in debug mode we initialize with MI_DEBUG_UNINIT, see issue #501
     else
-        page.b.is_zero = page.is_zero_init;
+        page.b.is_zero = page.b.is_zero_init;
 
     mi_assert_internal(page.b.is_committed);
     mi_assert_internal(!page.b.is_reset);

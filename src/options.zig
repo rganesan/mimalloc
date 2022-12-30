@@ -26,7 +26,7 @@ const mi = struct {
 };
 
 const MI_DEBUG = mi.MI_DEBUG;
-const MI_SHOW_ERRORS = 0;
+const MI_SHOW_ERRORS = false;
 
 const mi_option_t = mi.mi_option_t;
 
