@@ -379,7 +379,6 @@ static mi_decl_noinline void _mi_free_block_mt(mi_page_t* page, mi_block_t* bloc
   mi_check_padding(page, block);
   mi_padding_shrink(page, block, sizeof(mi_block_t));       // for small size, ensure we can fit the delayed thread pointers without triggering overflow detection
   
-  // huge page segments are always abandoned and can be freed immediately
   mi_segment_t* segment = _mi_page_segment(page);
   if (segment->kind == MI_SEGMENT_HUGE) {
     #if MI_HUGE_PAGE_ABANDON
