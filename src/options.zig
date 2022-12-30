@@ -268,8 +268,10 @@ fn mi_option_init(desc: *mi_option_desc_t) void {
     // Read option value from the environment
     var buf: [64]u8 = undefined;
     const b = std.fmt.bufPrint(&buf, "mimalloc_{s}", .{desc.name}) catch unreachable;
+    var envBuf: [128]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&envBuf);
     std.debug.print("{}\n", .{@TypeOf(b)});
-    const env = std.os.getenv(b);
+    const env = std.process.getEnvVarOwned(fba.allocator(), b) catch null;
 
     if (env != null) {
         if (!_mi_preloading()) {
