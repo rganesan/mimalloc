@@ -276,52 +276,6 @@ pub const mi_page_t = struct {
     pub fn init() Self {
         return Self{ .xheap = Atomic(?*mi_heap_t).init(null) };
     }
-
-    fn block_size(self: *const Self) usize {
-        const bsize = self.xblock_size;
-        mi_assert_internal(bsize > 0);
-        if (bsize < MI_HUGE_BLOCK_SIZE) {
-            return bsize;
-        }
-        var psize: usize = undefined;
-        _ = mi._mi_segment_page_start(mi._mi_page_segment(self), self, &psize);
-        psize = 0;
-        return psize;
-    }
-
-    fn thread_free(self: *const Self) ?*mi_block_t {
-        return @intToPtr(?*mi_block_t, self.xthread_free.load(AtomicOrder.Monotonic) & ~@intCast(mi_thread_free_t, 3)); // TODO: check boolMask usage
-    }
-
-    fn heap(self: *const Self) ?*mi_heap_t {
-        return self.xheap.load(AtomicOrder.Monotonic); // TODO: check order
-    }
-
-    fn all_free(self: *const Self) bool {
-        return self.used == 0;
-    }
-
-    fn is_valid(self: *const Self) bool {
-        // TODO: page.zig
-        _ = self;
-        return true;
-    }
-
-    fn segment(self: *const Self) *mi_segment_t {
-        return @intToPtr(*mi_segment_t, @ptrToInt(self) & MI_SEGMENT_MASK);
-    }
-
-    fn is_in_full(self: *const Self) bool {
-        return self.flags.x.in_full == 1;
-    }
-
-    fn set_in_full(self: *Self, in_full: bool) void {
-        self.flags.x.in_full = if (in_full) 1 else 0;
-    }
-
-    fn has_aligned(self: *const Self) bool {
-        self.flags.x.has_aligned;
-    }
 };
 
 pub const mi_page_kind_t = enum {
@@ -419,29 +373,6 @@ pub const mi_page_queue_t = struct {
     first: ?*mi_page_t = null,
     last: ?*mi_page_t = null,
     block_size: usize = 0,
-
-    fn is_huge(self: *const Self) bool {
-        return self.block_size == (mi.MEDIUM_OBJ_SIZE_MAX + @sizeOf(usize));
-    }
-
-    fn is_full(self: *const Self) bool {
-        return self.block_size == (mi.MEDIUM_OBJ_SIZE_MAX + 2 * @sizeOf(usize));
-    }
-
-    fn is_special(self: *const Self) bool {
-        return self.block_size > mi.MEDIUM_OBJ_SIZE_MAX;
-    }
-
-    fn contains(self: *const Self, page: *const mi_page_t) bool {
-        if (MI_DEBUG < 1) return true;
-        var list = self.first;
-        while (list) |l| : (list = l.next) {
-            mi_assert_internal(l.next == null or l.next.?.prev == l);
-            mi_assert_internal(l.prev == null or l.prev.?.next == l);
-            if (l == page) return true;
-        }
-        return false;
-    }
 };
 
 pub const MI_BIN_FULL = MI_BIN_HUGE + 1;
@@ -475,24 +406,6 @@ pub const mi_heap_t = struct {
     page_retired_max: usize = 0, // largest retired index into the `pages` array.
     next: ?*mi_heap_t = null, // list of heaps per thread
     no_reclaim: bool = false, // `true` if this heap should not reclaim abandoned pages
-
-    fn is_initialized(self: *const Self) bool {
-        return self != &mi._mi_heap_empty;
-    }
-
-    fn is_backing(self: *const Self) bool {
-        return (self.tld.?.heap_backing.? == self);
-    }
-
-    fn is_default(self: *const Self) bool {
-        return (self == mi.mi_get_default_heap());
-    }
-
-    fn contains(self: *const Self, pq: *const mi_page_queue_t) bool {
-        if (MI_DEBUG < 1) return true;
-        const pq_addr = @ptrToInt(pq);
-        return pq_addr >= @ptrToInt(&self.pages[0]) and pq_addr <= @ptrToInt(&self.pages[mi.MI_BIN_FULL]);
-    }
 };
 
 // ------------------------------------------------------
