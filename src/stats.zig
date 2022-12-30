@@ -351,7 +351,7 @@ fn _mi_stats_print(stats: *mi_stats_t, out0: mi_output_fun, arg0: ?mi_output_arg
     var buf: [256]u8 = undefined;
     var buffer = buffered_t{ .out = out0, .arg = arg0, .buf = &buf, .used = 0, .count = 255 };
     const out = &mi_buffered_out;
-    const arg = &buffer;
+    const arg = @ptrCast(mi_output_arg, &buffer);
 
     // and print using that
     mi_print_header(out, arg);
@@ -447,7 +447,7 @@ fn mi_stats_print_out(out: mi_output_fun, arg: ?mi_output_arg) void {
 
 pub fn mi_stats_print(out: ?mi_output_arg) void {
     // for compatibility there is an `out` parameter (which can be `stdout` or `stderr`)
-    mi_stats_print_out(@ptrCast(mi_output_fun, out), null);
+    mi_stats_print_out(@ptrCast(mi_output_fun, @alignCast(@alignOf(mi_output_fun), out)), null);
 }
 
 fn mi_thread_stats_print_out(out: mi_output_fun, arg: ?mi_output_arg) void {

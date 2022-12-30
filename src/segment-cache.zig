@@ -218,7 +218,7 @@ fn mi_segment_cache_purge(force: bool, tld: *mi_os_tld_t) void {
     else
         MI_CACHE_FIELDS; // probe at most N (=16) slots
 
-    var idx: usize = if (force) 0 else _mi_random_shuffle(@intCast(u64, now)) % MI_CACHE_MAX; // random start
+    var idx: usize = if (force) 0 else _mi_random_shuffle(@intCast(usize, now)) % MI_CACHE_MAX; // random start
     var visited: usize = 0;
     while (visited < max_visits) : (visited += 1) { // visit N slots
         if (idx >= MI_CACHE_MAX) idx = 0; // wrap
@@ -344,7 +344,7 @@ pub fn _mi_segment_map_allocated_at(segment: *const mi_segment_t) void {
     if (index == MI_SEGMENT_MAP_WSIZE) return;
     var mask = mi_atomic_load_relaxed(&mi_segment_map[index]);
     while (true) {
-        const newmask = (mask | @intCast(usize, 1) << mi.mi_shift_cast(bitidx));
+        const newmask = (mask | std.math.shl(usize, @intCast(usize, 1), bitidx));
         if (mi_atomic_cas_weak_release(&mi_segment_map[index], &mask, newmask)) break;
     }
 }

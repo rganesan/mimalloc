@@ -189,9 +189,9 @@ fn mi_heap_main_init() void {
         _mi_heap_main.thread_id = _mi_thread_id();
         _mi_heap_main.random = Prng.init(crandom.int(u64));
         const random = _mi_heap_main.random.random();
-        _mi_heap_main.cookie = random.int(u64);
-        _mi_heap_main.keys[0] = random.int(u64);
-        _mi_heap_main.keys[1] = random.int(u64);
+        _mi_heap_main.cookie = random.int(usize);
+        _mi_heap_main.keys[0] = random.int(usize);
+        _mi_heap_main.keys[1] = random.int(usize);
     }
 }
 
@@ -294,9 +294,9 @@ fn _mi_heap_init() bool {
         heap.thread_id = Thread.getCurrentId();
         heap.random = Prng.init(crandom.int(u64));
         const random = heap.random.random();
-        heap.cookie = random.int(u64) | 1;
-        heap.keys[0] = random.int(u64);
-        heap.keys[1] = random.int(u64);
+        heap.cookie = random.int(usize) | 1;
+        heap.keys[0] = random.int(usize);
+        heap.keys[1] = random.int(usize);
         heap.tld = tld;
         tld.heap_backing = heap;
         tld.heaps = heap;

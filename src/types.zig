@@ -176,7 +176,7 @@ pub const MI_MAX_ALIGN_GUARANTEE = 8 * MI_MAX_ALIGN_SIZE;
 pub const mi_encoded_t = usize;
 
 // thread id's
-pub const mi_threadid_t = usize;
+pub const mi_threadid_t = u64;
 
 // free lists contain blocks
 pub const mi_block_t = struct {
@@ -542,7 +542,7 @@ inline fn noop(cond: bool) void {
 const mi_assert_internal = if (MI_DEBUG > 1) mi_assert else noop;
 const mi_assert_expensive = if (MI_DEBUG > 2) mi_assert else noop;
 
-pub inline fn _mi_thread_id() usize {
+pub inline fn _mi_thread_id() u64 {
     return std.Thread.getCurrentId();
 }
 
@@ -877,13 +877,6 @@ fn mi_os_get_aligned_hint(try_alignment: usize, size_in: usize) ?[*]align(mem.pa
     }
     if (hint % try_alignment != 0) return null;
     return @intToPtr([*]align(mem.page_size) u8, hint);
-}
-
-// Helper for shifts
-pub fn mi_shift_cast(shift: usize) std.math.Log2Int(u64) {
-    const x = @intCast(std.math.Log2Int(u64), shift);
-    mi_assert_internal(x == shift);
-    return x;
 }
 
 // -------------------------------------------------------------------

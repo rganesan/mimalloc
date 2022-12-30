@@ -18,6 +18,7 @@
 //-----------------------------------------------------------------------------
 
 const std = @import("std");
+const math = std.math;
 const assert = std.debug.assert;
 const Atomic = std.atomic.Atomic;
 const AtomicOrder = std.builtin.AtomicOrder;
@@ -100,7 +101,7 @@ inline fn mi_bitmap_mask_(count: usize, bitidx: usize) usize {
     mi_assert_internal(count > 0);
     if (count >= MI_BITMAP_FIELD_BITS) return MI_BITMAP_FIELD_FULL;
     if (count == 0) return 0;
-    return (((@intCast(usize, 1) << mi.mi_shift_cast(count)) - 1) << mi.mi_shift_cast(bitidx));
+    return math.shl(usize, math.shl(usize, @intCast(usize, 1), count) - 1, bitidx);
 }
 
 //-----------------------------------------------------------
@@ -120,16 +121,16 @@ pub fn _mi_bitmap_try_find_claim_field(bitmap: mi_bitmap_t, idx: usize, count: u
     const mask: usize = mi_bitmap_mask_(count, 0);
     const bitidx_max = MI_BITMAP_FIELD_BITS - count;
 
-    var bitidx = mi.mi_shift_cast(@ctz(~map)); // quickly find the first zero bit if possible
-    var m = (mask << bitidx); // invariant: m == mask shifted by bitidx
+    var bitidx: usize = @ctz(~map); // quickly find the first zero bit if possible
+    var m = math.shl(usize, mask, bitidx); // invariant: m == mask shifted by bitidx
 
     // scan linearly for a free range of zero bits
     while (bitidx <= bitidx_max) {
         const mapm = map & m;
         if (mapm == 0) { // are the mask bits free at bitidx?
-            mi_assert_internal((m >> bitidx) == mask); // no overflow?
+            mi_assert_internal(math.shr(usize, m, bitidx) == mask); // no overflow?
             const newmap: usize = map | m;
-            mi_assert_internal((newmap ^ map) >> bitidx == mask);
+            mi_assert_internal(math.shr(usize, (newmap ^ map), bitidx) == mask);
             if (!mi_atomic_cas_weak_acq_rel(field, &map, newmap)) { // TODO: use strong cas here?
                 // no success, another thread claimed concurrently.. keep going (with updated `map`)
                 continue;
@@ -140,10 +141,10 @@ pub fn _mi_bitmap_try_find_claim_field(bitmap: mi_bitmap_t, idx: usize, count: u
             }
         } else {
             // on to the next bit range
-            const shift = mi.mi_shift_cast(if (count == 1) 1 else mi_bsr(mapm) - bitidx + 1);
+            const shift = if (count == 1) 1 else mi_bsr(mapm) - bitidx + 1;
             mi_assert_internal(shift > 0 and shift <= count);
             bitidx += shift;
-            m <<= shift;
+            m = math.shl(usize, m, shift);
         }
     }
     // no bits found

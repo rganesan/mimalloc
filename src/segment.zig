@@ -6,6 +6,7 @@
 //----------------------------------------------------------------------------
 
 const std = @import("std");
+const math = std.math;
 const assert = std.debug.assert;
 const Atomic = std.atomic.Atomic;
 const AtomicOrder = std.builtin.AtomicOrder;
@@ -328,8 +329,8 @@ fn mi_commit_mask_create(bitidx: usize, bitcount_in: usize, cm: *mi_commit_mask_
         while (bitcount > 0) {
             mi_assert_internal(i < MI_COMMIT_MASK_FIELD_COUNT);
             const avail = MI_COMMIT_MASK_FIELD_BITS - ofs;
-            const count = mi.mi_shift_cast(if (bitcount > avail) avail else bitcount);
-            const mask = if (count >= MI_COMMIT_MASK_FIELD_BITS) ~@intCast(usize, 0) else ((@intCast(usize, 1) << count) - 1) << mi.mi_shift_cast(ofs);
+            const count = if (bitcount > avail) avail else bitcount;
+            const mask = math.shl(usize, if (count >= MI_COMMIT_MASK_FIELD_BITS) ~@intCast(usize, 0) else math.shl(usize, @intCast(usize, 1), count) - 1, ofs);
             cm.mask[i] = mask;
             bitcount -= count;
             ofs = 0;
@@ -612,7 +613,7 @@ fn mi_segment_calculate_slices(required_in: usize, pre_size: ?*usize, info_slice
 // reuse and avoid setting/clearing guard pages in secure mode.
 //-------------------------------------------------------------------------------
 
-fn mi_segments_track_size(segment_size: isize, tld: *mi_segments_tld_t) void {
+fn mi_segments_track_size(segment_size: i64, tld: *mi_segments_tld_t) void {
     if (segment_size >= 0) _mi_stat_increase(&tld.stats.?.segments, 1) else _mi_stat_decrease(&tld.stats.?.segments, 1);
     if (segment_size >= 0) tld.count += 1 else tld.count -= 1;
     if (tld.count > tld.peak_count) tld.peak_count = tld.count;
