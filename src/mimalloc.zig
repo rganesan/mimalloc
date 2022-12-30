@@ -4,9 +4,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
-const mimalloc = @cImport(
-    @cInclude("mimalloc.h"),
-);
+const mimalloc = struct {
+    usingnamespace @import("alloc.zig"); // mi_page_usable_size and mi_free
+    usingnamespace @import("alloc-aligned.zig"); // mi_os_mem_alloc_aligned
+};
 
 // This is currently unused, still experimenting!
 pub const MiMallocOptions = struct {
@@ -66,5 +67,5 @@ fn free(state_ptr: *anyopaque, buf: []u8, buf_align: u8, ret_addr: usize) void {
     _ = state_ptr;
     _ = buf_align;
     _ = ret_addr;
-    mimalloc.mi_free(buf.ptr);
+    mimalloc.mi_free(@ptrCast(*u8, buf.ptr));
 }
