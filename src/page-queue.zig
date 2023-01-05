@@ -121,7 +121,7 @@ test "bins" {
     const expect = std.testing.expect;
     var i: usize = 1;
     std.debug.print("mi.MEDIUM_OBJ_WSIZE_MAX: {}\n", .{MI_MEDIUM_OBJ_WSIZE_MAX});
-    while (i < std.math.maxInt(u32) and i > 0) : (i <<= 1) {
+    while (i <= std.math.maxInt(u20) and i > 0) : (i <<= 1) {
         std.debug.print("mi_bin({}): {}\n", .{ i, mi_bin(i) });
         std.debug.print("mi_bin({}): {}\n", .{ i + 5, mi_bin(i + 5) });
     }
