@@ -13,16 +13,19 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const mem = std.mem;
 const Atomic = std.atomic.Atomic;
 const AtomicOrder = std.builtin.AtomicOrder;
 
 const mi = struct {
     usingnamespace @import("options.zig");
     usingnamespace @import("types.zig");
+    usingnamespace @import("os.zig");
     usingnamespace @import("segment.zig");
     usingnamespace @import("stats.zig");
     usingnamespace @import("bitmap.zig");
     usingnamespace @import("init.zig");
+    usingnamespace @import("arena.zig");
 };
 
 const MI_DEBUG = mi.MI_DEBUG;
@@ -153,7 +156,7 @@ fn mi_segment_cache_pop_ex(all_suitable: bool, size: usize, commit_mask: *mi_com
     const numa_node = _mi_os_numa_node(tld);
     var start_field: usize = 0;
     if (numa_node > 0) {
-        start_field = (MI_CACHE_FIELDS / _mi_os_numa_node_count()) * numa_node;
+        start_field = (MI_CACHE_FIELDS / _mi_os_numa_node_count()) * @intCast(usize, numa_node);
         if (start_field >= MI_CACHE_FIELDS) start_field = 0;
     }
 
@@ -201,7 +204,7 @@ fn mi_commit_mask_decommit(cmask: *mi_commit_mask_t, p: *anyopaque, total: usize
     if (mi_commit_mask_is_empty(cmask)) {
         // nothing
     } else if (mi_commit_mask_is_full(cmask)) {
-        _ = _mi_os_decommit(p, total, stats);
+        _ = _mi_os_decommit(@ptrCast([*]u8, @alignCast(std.mem.page_size, p)), total, stats);
     } else {
         // todo: one call to decommit the whole at once?
         mi_assert_internal((total % MI_COMMIT_MASK_BITS) == 0);
@@ -211,7 +214,7 @@ fn mi_commit_mask_decommit(cmask: *mi_commit_mask_t, p: *anyopaque, total: usize
         while (count > 0) : (count = _mi_commit_mask_next_run(cmask, &idx)) {
             const start = @ptrCast([*]u8, p) + (idx * part);
             const size = count * part;
-            _ = _mi_os_decommit(start, size, stats);
+            _ = _mi_os_decommit(@alignCast(mem.page_size, start), size, stats);
             idx += count;
         }
     }
@@ -301,10 +304,10 @@ pub fn _mi_segment_cache_push(start: *mi_segment_t, size: usize, memid: usize, c
     if (size != MI_SEGMENT_SIZE or (@ptrToInt(start) % MI_SEGMENT_ALIGN) != 0) return false;
 
     // numa node determines start field
-    const numa_node = _mi_os_numa_node(null);
+    const numa_node = _mi_os_numa_node(tld);
     var start_field: usize = 0;
     if (numa_node > 0) {
-        start_field = (MI_CACHE_FIELDS / _mi_os_numa_node_count()) * numa_node;
+        start_field = (MI_CACHE_FIELDS / _mi_os_numa_node_count()) * @intCast(usize, numa_node);
         if (start_field >= MI_CACHE_FIELDS) start_field = 0;
     }
 

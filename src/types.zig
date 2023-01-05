@@ -63,6 +63,8 @@ pub const MI_MAX_ALIGN_SIZE = 16;
 // Define VALGRIND to enable valgrind support
 const MI_VALGRIND = false;
 
+pub const MI_TRACK_ENABLED = false;
+
 // Define MI_SECURE to enable security mitigations
 // MI_SECURE = 1  // guard page around metadata
 // MI_SECURE = 2  // guard page around each mimalloc page
@@ -559,6 +561,12 @@ pub inline fn _mi_ptr_cookie(p: anytype) usize {
     return (@ptrToInt(p) ^ mi._mi_heap_main.cookie);
 }
 
+// Is a pointer aligned?
+pub inline fn _mi_is_aligned(p: anytype, alignment: usize) bool {
+    mi_assert_internal(alignment != 0);
+    return ((@ptrToInt(p) % alignment) == 0);
+}
+
 // Align upwards
 pub inline fn _mi_align_up(sz: usize, alignment: usize) usize {
     mi_assert_internal(alignment != 0);
@@ -726,167 +734,6 @@ pub fn mi_track_mem_undefined(p: anytype, size: usize) void {
 pub fn mi_track_mem_noaccess(p: anytype, size: usize) void {
     _ = p;
     _ = size;
-}
-
-// arena
-
-pub fn _mi_arena_id_none() mi_arena_id_t {
-    return 0;
-}
-
-fn mi_arena_id_is_suitable(arena_id: mi_arena_id_t, arena_is_exclusive: bool, req_arena_id: mi_arena_id_t) bool {
-    return ((!arena_is_exclusive and req_arena_id == _mi_arena_id_none()) or
-        (arena_id == req_arena_id));
-}
-
-pub fn _mi_arena_memid_is_suitable(arena_memid: usize, request_arena_id: mi_arena_id_t) bool {
-    const id = @intCast(mi_arena_id_t, arena_memid & 0x7F);
-    const exclusive = ((arena_memid & 0x80) != 0);
-    return mi_arena_id_is_suitable(id, exclusive, request_arena_id);
-}
-
-// Simplified version, directly get page OS. Can't use page_allocator because it ignores alignment
-pub fn _mi_arena_alloc_aligned(size: usize, alignment: usize, commit: *bool, large: *bool, is_pinned: *bool, is_zero: *bool, req_arena_id: mi_arena_id_t, memid: *usize, tld: *mi_os_tld_t) ?*anyopaque {
-    _ = large;
-    _ = is_pinned;
-    _ = is_zero;
-    _ = req_arena_id;
-    _ = memid;
-    _ = tld;
-
-    const hint = mi_os_get_aligned_hint(alignment, size);
-    var p = os.mmap(hint, size, os.PROT.WRITE | os.PROT.READ, os.MAP.PRIVATE | os.MAP.ANONYMOUS, -1, alignment) catch return null;
-
-    // if not aligned, free it, overallocate, and unmap around it
-    if (@ptrToInt(p.ptr) % alignment != 0) {
-        os.munmap(p);
-        std.log.warn("unable to allocate aligned OS memory directly, fall back to over-allocation ({} bytes, address: {*}, alignment: {}, commit: {})\n", .{ size, p.ptr, alignment, commit });
-        if (size >= (std.math.maxInt(isize) - alignment)) return null; // overflow
-        const over_size = size + alignment;
-        p = os.mmap(null, over_size, os.PROT.WRITE | os.PROT.READ, os.MAP.PRIVATE | os.MAP.ANONYMOUS, -1, alignment) catch return null;
-        // and selectively unmap parts around the over-allocated area. (noop on sbrk)
-        const aligned_p = mi_align_up_ptr(p.ptr, alignment);
-        const pre_size = @ptrToInt(aligned_p) - @ptrToInt(p.ptr);
-        const mid_size = _mi_align_up(size, _mi_os_page_size());
-        const post_size = over_size - pre_size - mid_size;
-        mi_assert_internal(pre_size < over_size and post_size < over_size and mid_size >= size);
-        if (pre_size > 0) os.munmap(p[0..pre_size]);
-        if (post_size > 0) os.munmap(@alignCast(mem.page_size, p[(pre_size + mid_size)..post_size]));
-        // we can return the aligned pointer on `mmap` (and sbrk) systems
-        return aligned_p;
-    }
-    return p.ptr;
-}
-
-// Simplified version, directly release memory to page_allocator
-pub fn _mi_arena_free(p: *anyopaque, size: usize, alignment: usize, align_offset: usize, memid: usize, all_committed: bool, tld: *mi_os_tld_t) void {
-    _ = memid;
-    _ = all_committed;
-    _ = tld;
-    _ = alignment;
-    _ = align_offset;
-    return os.munmap(@ptrCast([*]u8, @alignCast(mem.page_size, p))[0..size]);
-}
-
-// os
-
-// Signal to the OS that the address range is no longer in use
-// but may be used later again. This will release physical memory
-// pages and reduce swapping while keeping the memory committed.
-// We page align to a conservative area inside the range to reset.
-pub fn _mi_os_reset(addr: *anyopaque, size: usize, tld_stats: *mi_stats_t) bool {
-    _ = tld_stats;
-    // mi_stats_t* stats = &_mi_stats_main;
-    // return mi_os_resetx(addr, size, true, stats);
-    std.os.madvise(@alignCast(mem.page_size, @ptrCast([*]u8, addr)), size, std.os.MADV.FREE) catch return false;
-    return true;
-}
-
-pub fn _mi_os_commit(addr: *anyopaque, size: usize, is_zero: *bool, tld_stats: *mi_stats_t) bool {
-    // MI_UNUSED(tld_stats);
-    // mi_stats_t* stats = &_mi_stats_main;
-    // return mi_os_commitx(addr, size, true, false /* liberal */, is_zero, stats);
-    _ = tld_stats;
-    is_zero.* = false; // TODO: What does is_zero mean?
-    std.os.mprotect(@alignCast(mem.page_size, @ptrCast([*]u8, addr))[0..size], os.PROT.READ | os.PROT.WRITE) catch return false;
-    return true;
-}
-
-pub fn _mi_os_decommit(addr: *anyopaque, size: usize, tld_stats: *mi_stats_t) bool {
-    // mi_stats_t* stats = &_mi_stats_main;
-    // bool is_zero;
-    // return mi_os_commitx(addr, size, false, true /* conservative */, &is_zero, stats);
-    return _mi_os_reset(addr, size, tld_stats);
-}
-
-// TODO:
-pub fn _mi_os_protect(addr: *anyopaque, size: usize) bool {
-    // return mi_os_protectx(addr, size, true);
-    _ = addr;
-    _ = size;
-    return true;
-}
-
-pub fn _mi_os_unprotect(addr: *anyopaque, size: usize) bool {
-    // return mi_os_protectx(addr, size, false);
-    _ = addr;
-    _ = size;
-    return true;
-}
-
-pub fn _mi_os_numa_node(tld: ?*mi_os_tld_t) usize {
-    _ = tld;
-    return 0;
-}
-
-pub fn _mi_os_numa_node_count() usize {
-    return 1;
-}
-
-pub fn _mi_os_page_size() usize {
-    return std.mem.page_size;
-}
-
-//--------------------------------------------------------------
-//  aligned hinting
-//--------------------------------------------------------------
-
-// On 64-bit systems, we can do efficient aligned allocation by using
-// the 2TiB to 30TiB area to allocate those.
-
-var aligned_base = Atomic(usize).init(0);
-
-// Return a MI_SEGMENT_SIZE aligned address that is probably available.
-// If this returns NULL, the OS will determine the address but on some OS's that may not be
-// properly aligned which can be more costly as it needs to be adjusted afterwards.
-// For a size > 1GiB this always returns NULL in order to guarantee good ASLR randomization;
-// (otherwise an initial large allocation of say 2TiB has a 50% chance to include (known) addresses
-//  in the middle of the 2TiB - 6TiB address range (see issue #372))
-
-const MI_HINT_BASE = (2 << 40); // 2TiB start
-const MI_HINT_AREA = (4 << 40); // upto 6TiB   (since before win8 there is "only" 8TiB available to processes)
-const MI_HINT_MAX = (30 << 40); // wrap after 30TiB (area after 32TiB is used for huge OS pages)
-
-fn mi_os_get_aligned_hint(try_alignment: usize, size_in: usize) ?[*]align(mem.page_size) u8 {
-    if (MI_INTPTR_SIZE < 8 or try_alignment > MI_SEGMENT_SIZE) return null;
-    var size = _mi_align_up(size_in, MI_SEGMENT_SIZE);
-    if (size > 1 * MI_GiB) return null; // guarantee the chance of fixed valid address is at most 1/(MI_HINT_AREA / 1<<30) = 1/4096.
-    if (MI_SECURE > 0)
-        size += MI_SEGMENT_SIZE; // put in `MI_SEGMENT_SIZE` virtual gaps between hinted blocks; this splits VLA's but increases guarded areas.
-
-    var hint = mi_atomic_add_acq_rel(&aligned_base, size);
-    if (hint == 0 or hint > MI_HINT_MAX) { // wrap or initialize
-        var init: usize = MI_HINT_BASE;
-        if (MI_SECURE > 0 or MI_DEBUG == 0) { // security: randomize start of aligned allocations unless in debug mode
-            const r = _mi_heap_random_next(mi_get_default_heap());
-            init = init + ((MI_SEGMENT_SIZE * ((r >> 17) & 0xFFFFF)) % MI_HINT_AREA); // (randomly 20 bits)*4MiB == 0 to 4TiB
-        }
-        var expected = hint + size;
-        _ = mi_atomic_cas_strong_acq_rel(&aligned_base, &expected, init);
-        hint = mi_atomic_add_acq_rel(&aligned_base, size); // this may still give 0 or > MI_HINT_MAX but that is ok, it is a hint after all
-    }
-    if (hint % try_alignment != 0) return null;
-    return @intToPtr([*]align(mem.page_size) u8, hint);
 }
 
 // -------------------------------------------------------------------

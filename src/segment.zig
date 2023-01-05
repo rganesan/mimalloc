@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const math = std.math;
+const mem = std.mem;
 const assert = std.debug.assert;
 const Atomic = std.atomic.Atomic;
 const AtomicOrder = std.builtin.AtomicOrder;
@@ -14,8 +15,10 @@ const AtomicOrder = std.builtin.AtomicOrder;
 const mi = struct {
     usingnamespace @import("options.zig");
     usingnamespace @import("alloc.zig");
+    usingnamespace @import("os.zig");
     usingnamespace @import("init.zig");
     usingnamespace @import("types.zig");
+    usingnamespace @import("arena.zig");
     usingnamespace @import("heap.zig");
     usingnamespace @import("page.zig");
     usingnamespace @import("stats.zig");
@@ -733,7 +736,7 @@ fn mi_segment_commitx(segment: *mi_segment_t, commit: bool, p: [*]u8, size: usiz
         var cmask: mi_commit_mask_t = undefined;
         mi_commit_mask_create_intersect(&segment.commit_mask, &mask, &cmask);
         _mi_stat_decrease(&mi._mi_stats_main.committed, _mi_commit_mask_committed_size(&cmask, MI_SEGMENT_SIZE)); // adjust for overlap
-        if (!_mi_os_commit(start, full_size, &is_zero, stats)) return false;
+        if (!_mi_os_commit(@alignCast(mem.page_size, start), full_size, &is_zero, stats)) return false;
         mi_commit_mask_set(&segment.commit_mask, &mask);
     } else if (!commit and mi_commit_mask_any_set(&segment.commit_mask, &mask)) {
         mi_assert_internal(start != @ptrCast([*]u8, segment));
@@ -743,7 +746,7 @@ fn mi_segment_commitx(segment: *mi_segment_t, commit: bool, p: [*]u8, size: usiz
         mi_commit_mask_create_intersect(&segment.commit_mask, &mask, &cmask);
         _mi_stat_increase(&mi._mi_stats_main.committed, full_size - _mi_commit_mask_committed_size(&cmask, MI_SEGMENT_SIZE)); // adjust for overlap
         if (segment.allow_decommit) {
-            _ = _mi_os_decommit(start, full_size, stats); // ok if this fails
+            _ = _mi_os_decommit(@alignCast(mem.page_size, start), full_size, stats); // ok if this fails
         }
         mi_commit_mask_clear(&segment.commit_mask, &mask);
     }
@@ -1071,7 +1074,7 @@ fn mi_segment_init(segment_in: ?*mi_segment_t, required: usize, req_arena_id: mi
         if (!mi_commit_mask_all_set(&commit_mask, &commit_needed_mask)) {
             // at least commit the info slices
             mi_assert_internal(commit_needed * MI_COMMIT_SIZE >= info_slices * MI_SEGMENT_SLICE_SIZE);
-            const ok = _mi_os_commit(segment, commit_needed * MI_COMMIT_SIZE, &is_zero, tld.stats.?);
+            const ok = _mi_os_commit(@ptrCast([*]u8, @alignCast(mem.page_size, segment)), commit_needed * MI_COMMIT_SIZE, &is_zero, tld.stats.?);
             if (!ok) return null; // failed to commit
             mi_commit_mask_set(&commit_mask, &commit_needed_mask);
         }
@@ -1215,7 +1218,7 @@ fn mi_segment_page_clear(page: *mi_page_t, tld: *mi_segments_tld_t) *mi_slice_t 
         var psize: usize = undefined;
         const start = _mi_page_start(segment, page, &psize);
         page.b.is_reset = true;
-        _ = _mi_os_reset(start, psize, tld.stats.?);
+        _ = _mi_os_reset(@alignCast(mem.page_size, start), psize, tld.stats.?);
     }
 
     // zero the page data, but not the segment fields
@@ -1760,7 +1763,7 @@ pub fn _mi_segment_huge_page_reset(segment: *mi_segment_t, page: *mi_page_t, blo
     if (segment.allow_decommit) {
         const csize = mi_usable_size(block) - @sizeOf(mi_block_t);
         const p = @ptrCast([*]u8, block) + @sizeOf(mi_block_t);
-        _ = _mi_os_decommit(p, csize, &mi._mi_stats_main); // note: cannot use segment_decommit on huge segments
+        _ = _mi_os_decommit(@alignCast(mem.page_size, p), csize, &mi._mi_stats_main); // note: cannot use segment_decommit on huge segments
     }
 }
 

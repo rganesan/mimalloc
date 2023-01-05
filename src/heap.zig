@@ -13,6 +13,7 @@ const assert = std.debug.assert;
 
 const mi = struct {
     usingnamespace @import("types.zig");
+    usingnamespace @import("arena.zig");
     usingnamespace @import("init.zig");
     usingnamespace @import("page.zig");
     usingnamespace @import("stats.zig");

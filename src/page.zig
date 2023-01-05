@@ -25,14 +25,15 @@ const mi = struct {
     usingnamespace @import("page-queue.zig");
     usingnamespace @import("segment.zig");
     usingnamespace @import("stats.zig");
+
+    fn noop(cond: bool) void {
+        _ = cond;
+    }
 };
 
-fn noop(cond: bool) void {
-    _ = cond;
-}
 const mi_assert = assert;
-const mi_assert_internal = if (MI_DEBUG > 1) mi_assert else noop;
-const mi_assert_expensive = if (MI_DEBUG > 2) mi_assert else noop;
+const mi_assert_internal = if (MI_DEBUG > 1) mi_assert else mi.noop;
+const mi_assert_expensive = if (MI_DEBUG > 2) mi_assert else mi.noop;
 
 // alises to avoid clutter
 
