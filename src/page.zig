@@ -509,7 +509,7 @@ fn mi_page_fresh_alloc(heap: *mi_heap_t, pq: ?*mi_page_queue_t, block_size: usiz
         mi_assert_internal(page_alignment > 0 or block_size > MI_MEDIUM_OBJ_SIZE_MAX or block_size == pq.?.block_size);
     }
 
-    var page = _mi_segment_page_alloc(heap, block_size, &heap.tld.?.segments, &heap.tld.?.os) orelse return null;
+    var page = _mi_segment_page_alloc(heap, block_size, page_alignment, &heap.tld.?.segments, &heap.tld.?.os) orelse return null;
     // page null: this may be out-of-memory, or an abandoned page was reclaimed (and in our queue)
     mi_assert_internal(page_alignment > 0 or block_size > MI_MEDIUM_OBJ_SIZE_MAX or _mi_page_segment(page).kind != .MI_SEGMENT_HUGE);
     mi_assert_internal(pq != null or page.xblock_size != 0);

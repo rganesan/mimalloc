@@ -291,8 +291,8 @@ pub fn _mi_segment_cache_free_all(tld: *mi_os_tld_t) void {
                 size, &commit_mask, &decommit_mask, &large, &is_pinned, &is_zero, _mi_arena_id_none(), &memid, tld) orelse break;
             const csize = _mi_commit_mask_committed_size(&commit_mask, size);
             if (csize > 0 and !is_pinned) _mi_stat_decrease(&mi._mi_stats_main.committed, csize);
-            _mi_arena_free(p, size, MI_SEGMENT_ALIGN, 0, memid, is_pinned, // pretend not committed to not double count decommits
-                tld);
+            _mi_arena_free(@ptrCast([*]u8, p), size, MI_SEGMENT_ALIGN, 0, memid, is_pinned, // pretend not committed to not double count decommits
+                tld.stats.?);
         }
     }
 }
